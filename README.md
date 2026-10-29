@@ -118,7 +118,8 @@ node --import tsx scripts/voice-live.ts
 插件的产物是两半 JS 加一条 cordis patch。装进某个 DSH profile：
 
 ```bash
-npm pack                       # 得到 dsh-plugin-meeting-assistant-<version>.tgz
+npm install                    # `npm pack` 会跑 prepare（= `npm run build`），所以要装齐 devDependencies
+npm pack                       # 得到 dsh-plugin-meeting-assistant-<version>.tgz（带 lib/）
 dsh plugin --profile <profile> add ./dsh-plugin-meeting-assistant-<version>.tgz
 ```
 
