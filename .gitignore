@@ -1,0 +1,10 @@
+node_modules/
+lib/
+*.tgz
+.DS_Store
+
+# 打包给别人的安装包（npm pack 的 tgz + 校验和）：产物，不进版本库。
+dist/
+
+# 本机录音/转写/会前准备的临时目录（`scripts/voice-live.ts` 往这里落）与端到端抓到的真实 ASR 结果。
+.local/

@@ -1,0 +1,3 @@
+- insert:
+    - id: meeting-assistant
+      name: dsh-plugin-meeting-assistant
