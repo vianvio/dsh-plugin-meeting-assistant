@@ -100,6 +100,7 @@ npm run check      # 上面两个一起
 | `test/client-bundle.test.ts` | 客户端**产物**按 DSH 加载器跑一次，且只用 `inject` 里声明的服务 |
 | `test/host-bundle.test.ts` | 宿主**产物**的导出（`name`/`inject`/`apply`/`hostBuild`）与注入的版本号 |
 | `test/package-boundary.test.ts` | 源码里不许有仓库外的相对 import；manifest 里不许有 `file:` 依赖；产物里不许有别的插件的痕迹 |
+| `test/compat-session-v4.test.ts` | 真的注入消息必须能被会话格式 v4 的编码器接受（`kind:'plugin'` 那套写法仍被拒收） |
 | `test/import-graph.test.ts`、`test/client-boundary.test.ts`、`test/dock.test.ts` | 无环、客户端半不取 Node 内建、栏的落点与配色 |
 | `test/voice-kernel/*.test.mjs` | vendored 内核：run-task 协议、断线重连、重喂查重、WAV 头 |
 
