@@ -23,6 +23,7 @@ function RefreshIcon(){return <svg aria-hidden="true" width="16" height="16" vie
 export function MeetingToggle({sessionId,call,capture,available,closeDetails,getCwd,briefCache,clientVersion=''}:{sessionId:string;clientVersion?:string;call:VoiceCall;capture:MeetingCapture;available:boolean;closeDetails:()=>void;getCwd:()=>string;briefCache:BriefCache}){
   const local=useSyncExternalStore(capture.subscribe,capture.snapshot);
   const [status,setStatus]=useState<Status|null>(null),[panel,setPanel]=useState(false);
+  const [updateSnapshot,setUpdateSnapshot]=useState<PluginUpdateStatus|null>(null);
   const [view,setView]=useState<PanelView>('meeting'),[tab,setTab]=useState<ContentTab>('questions');
   const [preparing,setPreparing]=useState(false),[adviceHistory,setAdviceHistory]=useState(false);
   const [statusError,setStatusError]=useState(''),[error,setError]=useState('');
@@ -32,16 +33,25 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
   const wantFocus=useRef(false),entry=useRef<HTMLButtonElement>(null),menu=useRef<HTMLDetailsElement>(null);
   const startIntent=useRef(0),startingRef=useRef(false),resumeStart=useRef(false),currentSession=useRef(sessionId);
   const statusRequest=useRef(0),statusApplied=useRef(0),analysisRequest=useRef(0),analysisScope=useRef('');
-  currentSession.current=sessionId;
-  const refresh=useCallback(async()=>{const request=++statusRequest.current,next:Status=await call('status',{sessionId});if(currentSession.current===sessionId&&request>=statusApplied.current){statusApplied.current=request;setStatus(next);setStatusError('');}},[call,sessionId]);
+  const updateEpoch=useRef(0),updateService=useRef(call);
+  currentSession.current=sessionId;updateService.current=call;
+  const acceptUpdateStatus=useCallback((next:PluginUpdateStatus)=>{updateEpoch.current++;setUpdateSnapshot(next);},[]);
+  const refresh=useCallback(async()=>{const request=++statusRequest.current,epoch=updateEpoch.current,next:Status=await call('status',{sessionId});if(currentSession.current===sessionId&&request>=statusApplied.current){statusApplied.current=request;setStatus(next);setStatusError('');if(epoch===updateEpoch.current&&next.updates)setUpdateSnapshot(next.updates);}},[call,sessionId]);
   useEffect(()=>{
     startIntent.current++;startingRef.current=false;resumeStart.current=false;
     setStarting(false);setPreparing(false);setView('meeting');setTab('questions');setAdviceHistory(false);setResumeAfterSettings(false);setSeenAdvice(null);setError('');
     if(!available)return;
     let cancelled=false,timer:ReturnType<typeof setTimeout>;setStatus(null);setStatusError('');
-    const poll=async()=>{const observedAt=Date.now(),request=++statusRequest.current;try{const next:Status=await call('status',{sessionId});if(cancelled||request<statusApplied.current)return;statusApplied.current=request;setStatus(next);setStatusError('');capture.reconcile(next.active,observedAt);}catch(e){if(!cancelled)setStatusError(e instanceof Error?e.message:String(e));}finally{if(!cancelled)timer=setTimeout(()=>void poll(),1500);}};
+    const poll=async()=>{const observedAt=Date.now(),request=++statusRequest.current,epoch=updateEpoch.current;try{const next:Status=await call('status',{sessionId});if(cancelled||request<statusApplied.current)return;statusApplied.current=request;setStatus(next);setStatusError('');if(epoch===updateEpoch.current&&next.updates)setUpdateSnapshot(next.updates);capture.reconcile(next.active,observedAt);}catch(e){if(!cancelled)setStatusError(e instanceof Error?e.message:String(e));}finally{if(!cancelled)timer=setTimeout(()=>void poll(),1500);}};
     void poll();return ()=>{cancelled=true;clearTimeout(timer);};
   },[sessionId,call,capture,available]);
+  useEffect(()=>{
+    if(!panel||!available)return;
+    let cancelled=false;const epoch=updateEpoch.current;
+    // Update checks belong to the profile and never participate in meeting errors or capture.
+    void updateService.current('update/check',{}).then((next:PluginUpdateStatus)=>{if(!cancelled&&epoch===updateEpoch.current)acceptUpdateStatus(next);}).catch(()=>{});
+    return ()=>{cancelled=true;};
+  },[panel,available,acceptUpdateStatus]);
   const markViewed=useCallback((id:string)=>setSeenAdvice(id),[]),onDockClose=useCallback(()=>setPanel(false),[]);
   const meta=preparing?undefined:status?.result?.recording;
   const scope=`${sessionId}/${meta?.id??''}`;analysisScope.current=scope;
@@ -55,8 +65,11 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
   const hasError=!!(error||statusError||local.error||meta?.error);
   const prepared=!meta&&!liveHere&&!other&&!pending&&!stopping;
   const hostOutdated=!!clientVersion&&!!status&&status.hostVersion!==clientVersion;
-  const updates=status?.updates,installing=updates?.phase==='installing';
-  const updateHint=isNewerPluginVersion(updates?.installedVersion,updates?.currentVersion)?'插件更新待重启':isNewerPluginVersion(updates?.latestVersion,updates?.currentVersion)?'有插件更新':null;
+  const updates=updateSnapshot,installing=updates?.phase==='installing';
+  const pendingRestart=isNewerPluginVersion(updates?.installedVersion,updates?.currentVersion),hasUpdate=isNewerPluginVersion(updates?.latestVersion,updates?.currentVersion);
+  const updateTarget=pendingRestart?updates?.installedVersion:hasUpdate?updates?.latestVersion:null;
+  const updateLabel=pendingRestart?'待重启':installing?'更新中…':updates?.phase==='waiting'?'待更新':'更新';
+  const updateHint=pendingRestart?'插件更新待重启':hasUpdate?'有插件更新':null;
   const select=async(recordingId:string)=>{try{await call('select',{sessionId,recordingId});if(currentSession.current!==sessionId)return;setPreparing(false);setView('meeting');setError('');await refresh();}catch(e){setError(e instanceof Error?e.message:String(e));}};
   const openPanel=()=>{closeDetails();if(dockStore.has(PANEL_ID))dockStore.activate(PANEL_ID);wantFocus.current=true;setPanel(true);setView('meeting');if(status?.active?.sessionId===sessionId){setPreparing(false);if(meta?.id!==status.active.id)void select(status.active.id);}};
   const closePanel=()=>{setPanel(false);entry.current?.focus();};
@@ -108,8 +121,11 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
   const tabs:readonly [ContentTab,string][]=[['questions','追问'],['replies','回应'],['transcript','转写']];
   const body=<section aria-label="会议助手" onKeyDown={event=>{event.stopPropagation();if(event.key==='Escape'){event.preventDefault();if(menu.current?.open){closeMenu();menu.current?.querySelector('summary')?.focus();}else if(view!=='meeting')back();else closePanel();}}} onPaste={event=>event.stopPropagation()} onClick={event=>event.stopPropagation()} onPointerDown={event=>{event.stopPropagation();if(!menu.current?.contains(event.target as Node))closeMenu();}} style={{height:'100%',minHeight:0,boxSizing:'border-box',display:'flex',flexDirection:'column',padding:'18px 20px',fontSize:13}}>
     <header style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,minHeight:32,flexShrink:0,marginBottom:20}}>
-      {view!=='meeting'?<div style={{display:'flex',alignItems:'center',gap:8,minWidth:0}}><button style={{...quiet,padding:'2px 5px',fontSize:22,lineHeight:1}} aria-label="返回会议" onClick={back}>‹</button><strong style={{fontSize:15}}>{sectionTitle}</strong></div>:liveHere||stopping?<div role="status" aria-label={stopping?'正在保存':'录音中'} style={{display:'flex',alignItems:'center',gap:9}}><span aria-hidden="true" style={{width:7,height:7,borderRadius:'50%',background:stopping?'#888':'#dc5e57'}}/><span style={{fontSize:18,fontWeight:550,fontVariantNumeric:'tabular-nums',letterSpacing:'.02em'}}>{elapsed||'0:00'}</span>{local.recording&&<meter aria-label="麦克风音量" title={local.deviceLabel||'麦克风'} min={0} max={1} value={local.level} style={{width:40,height:7,opacity:.65}}/>}</div>:<strong style={{fontSize:16}}>{sectionTitle}</strong>}
-      <div style={{display:'flex',gap:5,alignItems:'center'}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,minWidth:0,flex:1}}>
+        {view!=='meeting'?<div style={{display:'flex',alignItems:'center',gap:8,minWidth:0}}><button style={{...quiet,padding:'2px 5px',fontSize:22,lineHeight:1}} aria-label="返回会议" onClick={back}>‹</button><strong style={{fontSize:15}}>{sectionTitle}</strong></div>:liveHere||stopping?<div role="status" aria-label={stopping?'正在保存':'录音中'} style={{display:'flex',alignItems:'center',gap:9,minWidth:0}}><span aria-hidden="true" style={{width:7,height:7,flexShrink:0,borderRadius:'50%',background:stopping?'#888':'#dc5e57'}}/><span style={{fontSize:18,fontWeight:550,fontVariantNumeric:'tabular-nums',letterSpacing:'.02em',flexShrink:0,whiteSpace:'nowrap'}}>{elapsed||'0:00'}</span>{local.recording&&<meter aria-label="麦克风音量" title={local.deviceLabel||'麦克风'} min={0} max={1} value={local.level} style={{width:40,minWidth:0,flexShrink:1,height:7,opacity:.65}}/>}</div>:<strong style={{fontSize:16,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{sectionTitle}</strong>}
+        {view==='meeting'&&updateTarget&&<button type="button" aria-label="查看插件更新" title={`插件更新 · ${updateTarget}`} disabled={installing} onClick={()=>{closeMenu();setView('updates');}} style={{...button,color:'#2769e7',borderColor:'#2769e733',background:'#2769e710',borderRadius:5,padding:'2px 6px',fontSize:11,lineHeight:1.5,whiteSpace:'nowrap',flexShrink:0,opacity:installing?.6:1,cursor:installing?'default':'pointer'}}>{updateLabel}</button>}
+      </div>
+      <div style={{display:'flex',gap:5,alignItems:'center',flexShrink:0,whiteSpace:'nowrap'}}>
         {liveHere&&local.recording&&<button aria-label="结束录音" style={{...quiet,display:'inline-flex',alignItems:'center',gap:6}} onClick={()=>void end()}><span aria-hidden="true" style={{width:8,height:8,borderRadius:2,background:'#dc5e57'}}/>结束</button>}
         {view==='meeting'&&meta&&!liveHere&&!active&&<button style={quiet} onClick={newMeeting}>新会议</button>}
         <details ref={menu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node))event.currentTarget.open=false;}} style={{position:'relative'}}>
@@ -140,7 +156,7 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
       {tab!=='transcript'&&meta&&status?.coach&&<div style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:3}}>{status.coach.running?<button style={quiet} aria-label="取消分析" aria-busy={cancelling} disabled={analysisBusy} onClick={()=>void analyze('coach/cancel',{jobId:status.coach?.running?.id})}>{cancelling?'正在取消…':'取消分析'}</button>:<button style={{...quiet,display:'flex',padding:'5px 2px 9px'}} aria-label="更新建议" title="更新建议" disabled={analysisBusy||hostOutdated||installing} onClick={()=>void analyze('coach/generate')}><RefreshIcon/></button>}</div>}
     </div>}
     <div style={{overflowY:'auto',flex:1,minHeight:0,paddingRight:2}}>
-      {view==='updates'?<PluginUpdates call={call} visible={panel&&view==='updates'} currentVersion={clientVersion}/>:view==='settings'?<MeetingSettings heading={false} call={call} recording={active} submitLabel={resumeAfterSettings?'保存并开始录音':undefined} onSaved={async()=>{const resume=resumeStart.current;resumeStart.current=false;setResumeAfterSettings(false);setView('meeting');if(resume)await begin();}}/>:view==='background'?editor:view==='history'?<div aria-label="历史会议记录">
+      {view==='updates'?<PluginUpdates call={call} visible={panel&&view==='updates'} currentVersion={clientVersion} onStatusChange={acceptUpdateStatus}/>:view==='settings'?<MeetingSettings heading={false} call={call} recording={active} submitLabel={resumeAfterSettings?'保存并开始录音':undefined} onSaved={async()=>{const resume=resumeStart.current;resumeStart.current=false;setResumeAfterSettings(false);setView('meeting');if(resume)await begin();}}/>:view==='background'?editor:view==='history'?<div aria-label="历史会议记录">
         {status?.recordings.length?status.recordings.map(item=><button key={item.id} style={{...quiet,width:'100%',textAlign:'left',padding:'14px 0',borderRadius:0,borderBottom:'1px solid #8882',display:'flex',justifyContent:'space-between',gap:12}} onClick={()=>void select(item.id)}><span>{new Date(item.startedAt).toLocaleString()}</span><span style={{opacity:.5,fontVariantNumeric:'tabular-nums'}}>{time((item.endedAt??Date.now())-item.startedAt)}</span></button>):<p style={muted}>暂无记录</p>}
       </div>:other?<p role="status" style={{lineHeight:1.8,margin:0}}>另一会话正在{local.phase==='permission'?'等待录音授权':'录音'}。</p>:pending?<div role="status" style={{padding:'30px 0',display:'grid',gap:20,justifyItems:'center'}}><span>{local.phase==='permission'?'等待麦克风授权':local.phase==='connecting'?'正在连接麦克风':'准备录音…'}</span><button style={button} onClick={cancelStart}>取消启动</button></div>:stopping?<p role="status" style={muted}>正在保存录音…</p>:prepared?editor:meta?<>
         {meta.error&&<p role="alert" style={{color:'#c24b43',lineHeight:1.7,marginTop:0}}>{meta.error}</p>}

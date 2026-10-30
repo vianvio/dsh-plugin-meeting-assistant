@@ -34,18 +34,18 @@ function phaseMessage(status:PluginUpdateStatus):string{
 }
 
 /** Update preferences belong to the plugin profile, so no request carries a meeting session. */
-export function PluginUpdates({call,visible=true,currentVersion=''}:{call:VoiceCall;visible?:boolean;currentVersion?:string}){
+export function PluginUpdates({call,visible=true,currentVersion='',onStatusChange}:{call:VoiceCall;visible?:boolean;currentVersion?:string;onStatusChange?:(status:PluginUpdateStatus)=>void}){
   const [status,setStatus]=useState<PluginUpdateStatus|null>(null),[busy,setBusy]=useState<Operation|null>(null);
   const [readError,setReadError]=useState(''),[actionError,setActionError]=useState('');
-  const service=useRef(call),mounted=useRef(false),sequence=useRef(0);
+  const service=useRef(call),statusListener=useRef(onStatusChange),mounted=useRef(false),sequence=useRef(0);
   const pendingRead=useRef<number|null>(null),operation=useRef<Operation|null>(null);
-  service.current=call;
+  service.current=call;statusListener.current=onStatusChange;
   const read=useCallback(async()=>{
     if(!mounted.current||operation.current||(pendingRead.current!==null&&pendingRead.current===sequence.current))return;
     const request=++sequence.current;pendingRead.current=request;
     try{
       const next:PluginUpdateStatus=await service.current('update/status',{});
-      if(mounted.current&&request===sequence.current){setStatus(next);setReadError('');}
+      if(mounted.current&&request===sequence.current){setStatus(next);setReadError('');statusListener.current?.(next);}
     }catch{
       if(mounted.current&&request===sequence.current)setReadError('读取更新状态失败，请重试。');
     }finally{if(pendingRead.current===request)pendingRead.current=null;}
@@ -77,7 +77,7 @@ export function PluginUpdates({call,visible=true,currentVersion=''}:{call:VoiceC
     const request=++sequence.current;operation.current=kind;setBusy(kind);setActionError('');setReadError('');
     try{
       const next:PluginUpdateStatus=await service.current(`update/${kind}`,payload);
-      if(mounted.current&&request===sequence.current)setStatus(next);
+      if(mounted.current&&request===sequence.current){setStatus(next);statusListener.current?.(next);}
     }catch{
       if(mounted.current&&request===sequence.current)setActionError(requestErrors[kind]);
     }finally{
