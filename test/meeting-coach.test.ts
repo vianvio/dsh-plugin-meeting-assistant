@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtempSync,mkdirSync,writeFileSync,rmSync,symlinkSync,statSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync,realpathSync,statSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {zipSync,strToU8} from 'fflate';
 import {MeetingService} from '../src/voice/service.js';
 import {MeetingStore} from '../src/voice/store.js';
 import {MeetingCoach,automaticReason,countMeetingCharacters} from '../src/voice/coach.js';
@@ -18,11 +17,11 @@ const content:AdviceContent={summary:'确认发布范围与资源边界。',aske
 const baseline:CoachState={throughLine:0,coveredChars:0,lastSuccessAt:1_000_000,lastAttemptAt:0,failedThroughLine:-1,latestId:null,running:null,error:null,history:[]};
 const flush=()=>new Promise<void>(resolve=>setImmediate(resolve));
 
-function fixture(){
+function fixture(respectAbort=true,timeoutMs=90_000){
   const root=mkdtempSync(join(tmpdir(),'mesh-coach-')),workspace=join(root,'workspace');mkdirSync(workspace);
   const store=new MeetingStore(root),briefs=new BriefStore(store);let clock=1_000_000;
   const calls:{input:{system:string;prompt:string};resolve:(text:string)=>void;reject:(reason:Error)=>void}[]=[];
-  const coach=new MeetingCoach(store,(input,signal)=>new Promise<string>((resolve,reject)=>{calls.push({input,resolve,reject});signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true});}),()=>clock);
+  const coach=new MeetingCoach(store,(input,signal)=>new Promise<string>((resolve,reject)=>{calls.push({input,resolve,reject});if(respectAbort)signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true});}),()=>clock,timeoutMs);
   let hooks:StreamHooks;
   saveConfig(root,{apiKey:'fixture',wsBase:'wss://example.invalid/asr',model:'fixture'});
   const service=new MeetingService(root,(_config,callbacks)=>{hooks=callbacks;return {state:'connecting',startedAt:Date.now(),audioZeroWall:null,refeedMs:0,queuedBytes:0,async start(){this.state='ready';},sendAudio(){},async stop(){this.state='finished';},forceDrop(){this.state='failed';}};},{started:meta=>{meta.startedAt=clock;store.save(meta);coach.started(meta);},transcribed:(meta,entry)=>coach.transcribed(meta,entry),tick:meta=>coach.tick(meta)});
@@ -40,18 +39,24 @@ test('one trigger rule: time requires new text; simultaneous thresholds coalesce
   assert.equal(automaticReason({...baseline,failedThroughLine:1},1,900,1_400_000),null);
 });
 
-test('selected workspace files are scoped, snapshotted and bounded; Word text is supported',async()=>{
+test('brief save binds project and text without scanning files; legacy snapshots stay readable',async()=>{
   const f=fixture();try{
-    writeFileSync(join(f.workspace,'brief.md'),'批准预算为两万元。');writeFileSync(join(f.root,'private.txt'),'OUTSIDE_SECRET');symlinkSync(join(f.root,'private.txt'),join(f.workspace,'linked.txt'));
-    const word=zipSync({'word/document.xml':strToU8('<w:document><w:p><w:r><w:t>周五 &amp; 试点</w:t></w:r></w:p></w:document>')});writeFileSync(join(f.workspace,'plan.docx'),word);
-    const saved=await f.briefs.save('a',f.workspace,{...draft,filePaths:['brief.md','plan.docx']});assert.equal(saved.files[1]!.text.trim(),'周五 & 试点');
-    const record=f.store.create('a');f.briefs.initialize('a',record.id);writeFileSync(join(f.workspace,'brief.md'),'文件已变化。');assert.match(f.briefs.read('a',record.id).files[0]!.text,/两万元/);
-    assert.equal('text' in f.briefs.public(saved).files[0]!,false);assert.equal(statSync(f.briefs.path('a',record.id)).mode&0o777,0o600);
-    await assert.rejects(f.briefs.save('a',f.workspace,{...draft,filePaths:['../private.txt']}),/工作区/);
-    await assert.rejects(f.briefs.save('a',f.workspace,{...draft,filePaths:['linked.txt']}),/工作区以外/);
+    const paths=['../private.txt',...Array.from({length:12},(_,i)=>`missing-${i}.md`)];
+    const saved=await f.briefs.save('a',f.workspace,{...draft,goal:'确认发布边界',filePaths:paths});
+    assert.equal(saved.cwd,realpathSync(f.workspace));assert.equal(saved.goal,'确认发布边界');
+    assert.deepEqual(saved.files,[]);assert.deepEqual(saved.filePaths,[]);assert.equal(f.calls.length,0);
+    const record=f.store.create('a');f.briefs.initialize('a',record.id);
+    assert.equal(f.briefs.read('a',record.id).cwd,saved.cwd);
+    assert.equal(statSync(f.briefs.path('a',record.id)).mode&0o777,0o600);
+    const legacy={...saved,filePaths:['old.md'],files:[{path:'old.md',size:10,text:'批准预算为两万元。',truncated:false,savedAt:1}]};
+    delete (legacy as Partial<typeof legacy>).goal;
+    writeFileSync(f.briefs.path('a',record.id),JSON.stringify(legacy));
+    const migrated=f.briefs.read('a',record.id);
+    assert.equal(migrated.goal,'');assert.match(migrated.files[0]!.text,/两万元/);
+    assert.equal('text' in f.briefs.public(migrated).files[0]!,false);
+    const updated=await f.briefs.save('a','/must-not-scan-or-rebind',{...draft,goal:'确认预算',filePaths:paths},record.id);
+    assert.equal(updated.cwd,saved.cwd);assert.equal(updated.goal,'确认预算');assert.deepEqual(updated.files,[]);
     await assert.rejects(listMeetingFiles(f.workspace,'..'),/工作区/);
-    assert.equal((await listMeetingFiles(f.workspace)).entries.find(file=>file.name==='plan.docx')?.supported,true);
-    await assert.rejects(f.briefs.save('a',f.workspace,{...draft,filePaths:Array(9).fill('brief.md')}),/8/);
   }finally{await f.cleanup();}
 });
 
@@ -92,4 +97,91 @@ test('editing a brief does not rewrite an in-flight snapshot or old advice; malf
     f.coach.request('a',recording.id);await f.waitCalls(2);assert.match(f.calls[1]!.input.prompt,/技术顾问/);f.calls[1]!.resolve('not json');await f.coach.settled('a',recording.id);assert.equal(f.coach.state(recording).latestId,firstId);
     const parsed=parseAdvice(JSON.stringify({...content,askedOfMe:[{...content.askedOfMe[0],sources:['T999','B_ROLE']}]}),[{id:'B_ROLE',label:'角色',excerpt:'技术顾问'}]);assert.deepEqual(parsed.askedOfMe[0]!.sources,['B_ROLE']);
   }finally{await f.cleanup();}
+});
+
+
+test('cancel immediately clears running state even when the provider ignores abort',async()=>{
+  const f=fixture(false);try{
+    await f.briefs.save('a',f.workspace,{...draft,autoEnabled:false});const {recording}=f.service.start('a');await flush();f.sentence('需要分析的内容');
+    const request=f.coach.request('a',recording.id);await f.waitCalls(1);
+    f.coach.cancel('a',recording.id);
+    assert.equal(f.coach.state(recording).running,null,'cancel must not wait for the model result');
+    assert.equal(f.coach.state(recording).latestId,null);assert.equal(f.coach.state(recording).throughLine,0);
+    assert.equal(f.service.active?.meta.state,'recording');
+    await f.coach.settled('a',recording.id);
+  }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
+});
+
+test('a cancelled late result cannot overwrite a newer successful analysis',async()=>{
+  const f=fixture(false);try{
+    await f.briefs.save('a',f.workspace,{...draft,autoEnabled:false});const {recording}=f.service.start('a');await flush();f.sentence('会议内容');
+    const first=f.coach.request('a',recording.id);await f.waitCalls(1);f.coach.cancel('a',recording.id);
+    const next=f.coach.request('a',recording.id);assert.equal(next.reused,false);await f.waitCalls(2);
+    f.calls[1]!.resolve(JSON.stringify({...content,summary:'新的分析结果'}));await f.coach.settled('a',recording.id);
+    f.calls[0]!.resolve(JSON.stringify({...content,summary:'过期分析结果'}));await flush();await flush();
+    const state=f.coach.state(recording);assert.equal(state.latestId,next.jobId);assert.equal(state.history.length,1);
+    assert.equal(f.coach.readAdvice('a',recording.id,state.latestId!).content.summary,'新的分析结果');assert.equal(state.error,null);
+  }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
+});
+
+test('an error from a cancelled analysis cannot clear its replacement running state',async()=>{
+  const f=fixture(false);try{
+    await f.briefs.save('a',f.workspace,{...draft,autoEnabled:false});const {recording}=f.service.start('a');await flush();f.sentence('会议内容');
+    f.coach.request('a',recording.id);await f.waitCalls(1);f.coach.cancel('a',recording.id);
+    const next=f.coach.request('a',recording.id);await f.waitCalls(2);
+    f.calls[0]!.reject(new Error('late provider failure'));await flush();await flush();
+    const state=f.coach.state(recording);assert.equal(state.running?.id,next.jobId);assert.equal(state.error,null);
+    f.calls[1]!.resolve(JSON.stringify(content));await f.coach.settled('a',recording.id);
+  }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
+});
+
+
+async function bounded<T>(promise:Promise<T>){
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try{return await Promise.race([promise,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('analysis did not settle after cancellation')),1000);})]);}
+  finally{if(timer!==undefined)clearTimeout(timer);}
+}
+
+test('a stale cancellation id cannot cancel a replacement task',async()=>{
+  const f=fixture(false);try{
+    await f.briefs.save('a',f.workspace,{...draft,autoEnabled:false});const {recording}=f.service.start('a');await flush();
+    const first=f.coach.request('a',recording.id);await f.waitCalls(1);
+    assert.equal(f.coach.cancel('a',recording.id,first.jobId).cancelled,true);
+    const next=f.coach.request('a',recording.id);await f.waitCalls(2);
+    assert.equal(f.coach.cancel('a',recording.id,first.jobId).cancelled,false);
+    assert.equal(f.coach.state(recording).running?.id,next.jobId);
+    assert.equal(f.coach.cancel('a',recording.id,next.jobId).cancelled,true);
+    assert.equal(f.coach.cancel('a',recording.id,next.jobId).cancelled,false);
+  }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
+});
+
+test('cancel suppresses immediate automatic reanalysis of already available content',async()=>{
+  const f=fixture(false);try{
+    await f.briefs.save('a',f.workspace,draft);const {recording}=f.service.start('a');await flush();
+    f.sentence('新'.repeat(500));await f.waitCalls(1);f.advance(120_000);f.sentence('已到达的内容');
+    f.coach.cancel('a',recording.id);const state=f.coach.state(recording);
+    assert.equal(state.failedThroughLine,recording.segments);assert.equal(state.lastAttemptAt,1_120_000);
+    f.coach.tick(recording);await flush();assert.equal(f.calls.length,1);
+    f.advance(60_001);f.coach.tick(recording);await flush();assert.equal(f.calls.length,1,'cancelled content alone never reopens the task');
+    f.sentence('取消后的新信息');await f.waitCalls(2);
+    f.calls[1]!.resolve(JSON.stringify(content));await f.coach.settled('a',recording.id);
+  }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
+});
+
+test('deadline clears a task even if the provider never returns',async()=>{
+  const f=fixture(false,150);try{
+    await f.briefs.save('a',f.workspace,{...draft,autoEnabled:false});const {recording}=f.service.start('a');await flush();
+    f.coach.request('a',recording.id);await f.waitCalls(1);await bounded(f.coach.settled('a',recording.id));
+    const state=f.coach.state(recording);assert.equal(state.running,null);assert.match(state.error!,/超时/);
+    assert.equal(state.latestId,null);assert.equal(state.throughLine,0);assert.ok(f.service.active);
+  }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
+});
+
+test('dispose does not hang on a provider that ignores abort',async()=>{
+  const f=fixture(false);try{
+    await f.briefs.save('a',f.workspace,{...draft,autoEnabled:false});const {recording}=f.service.start('a');await flush();
+    f.coach.request('a',recording.id);await f.waitCalls(1);
+    await bounded(f.coach.dispose());assert.equal(f.coach.state(recording).running,null);
+    assert.ok(f.service.active,'cancelling analysis does not stop the microphone service');
+  }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
 });

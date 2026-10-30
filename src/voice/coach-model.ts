@@ -5,6 +5,7 @@ import {createUserMessage,ReasoningEffortId} from '@deepseek-ai/dsh-llm';
 import {agentTask} from './coach-prompt.js';
 import {optionalService} from './services.js';
 import {ADVICE_SCHEMA} from './advice-schema.js';
+import {abortable} from './abortable.js';
 import type {GenerateAdvice} from './coach-types.js';
 import {SessionId,type SessionIdLike} from '../shared/session-id.js';
 import {sourceFor} from '../shared/host-source.js';
@@ -50,18 +51,33 @@ type OptionalServices={
 /** One assembled request: the role/format text and the JSON input payload. */
 type AdviceRequest={system:string;prompt:string};
 
+/** Cleanup is best effort, including providers that throw before returning a promise. */
+const cleanup=async(operation:()=>unknown):Promise<void>=>{try{await operation();}catch{}};
+
 const directAdvice=async(ctx:Context,{system,prompt}:AdviceRequest,signal:AbortSignal):Promise<string>=>{
-  let text='',finished=false;
-  for await(const chunk of ctx.llm.stream({provider:'deepseek-official',model:'deepseek-flash',reasoningEffort:ReasoningEffortId('off'),maxTokens:5000,system,messages:[createUserMessage({content:[{type:'text',text:prompt}],source:sourceFor('dsh-plugin-meeting-assistant')} as never)],tools:[],signal})){
-    if(chunk.type==='text-delta'){text+=chunk.text;if(text.length>50000)throw new Error('建议输出过长，请减少会议资料后重试。');}
-    if(chunk.type==='finish'){
-      if(chunk.reason.kind==='error')throw new Error(redact(chunk.reason.failure.message));
-      if(chunk.reason.kind==='aborted')throw new Error('生成已取消或超时。');
-      if(chunk.reason.kind!=='stop')throw new Error('建议未完整生成，请重试。');
-      finished=true;
+  signal.throwIfAborted();
+  let text='',finished=false,exhausted=false;
+  const iterator=ctx.llm.stream({provider:'deepseek-official',model:'deepseek-flash',reasoningEffort:ReasoningEffortId('off'),maxTokens:5000,system,messages:[createUserMessage({content:[{type:'text',text:prompt}],source:sourceFor('dsh-plugin-meeting-assistant')} as never)],tools:[],signal})[Symbol.asyncIterator]();
+  try{
+    while(true){
+      signal.throwIfAborted();
+      const next=await abortable(iterator.next(),signal);
+      if(next.done){exhausted=true;break;}
+      const chunk=next.value;
+      if(chunk.type==='text-delta'){text+=chunk.text;if(text.length>50000)throw new Error('建议输出过长，请减少会议资料后重试。');}
+      if(chunk.type==='finish'){
+        if(chunk.reason.kind==='error')throw new Error(redact(chunk.reason.failure.message));
+        if(chunk.reason.kind==='aborted')throw new Error('生成已取消或超时。');
+        if(chunk.reason.kind!=='stop')throw new Error('建议未完整生成，请重试。');
+        finished=true;
+      }
     }
+    signal.throwIfAborted();if(!finished||!text.trim())throw new Error('未收到完整的建议，请检查 DeepSeek 配置。');return text;
+  }finally{
+    // Async generators can queue return() behind the very next() that is stuck.
+    // Observe cleanup failures, but never let that queue hold cancellation open.
+    if(!exhausted)await abortable(cleanup(()=>iterator.return?.()),signal);
   }
-  signal.throwIfAborted();if(!finished||!text.trim())throw new Error('未收到完整的建议，请检查 DeepSeek 配置。');return text;
 };
 
 /**
@@ -76,18 +92,37 @@ const agentAdvice=async(subagents:NonNullable<OptionalServices['subagents']>,par
   // `delivery:'caller'` is the contract this whole file turns on: the activation's result
   // comes back here and nothing is injected into the user's conversation. `parent` rides
   // the request (DSH 0.2.1), not the activation envelope.
-  const activation:SubagentActivation=await subagents.startActivation({
+  signal.throwIfAborted();
+  let activation:SubagentActivation|undefined,disposed=false,disposal:Promise<void>|undefined;
+  const dispose=()=>{
+    const current=activation;
+    if(!current||disposed)return disposal;
+    disposed=true;
+    // A cancelled start can deliver an activation whose result we never await.
+    // Disposal is not guaranteed to observe that promise for us.
+    void cleanup(()=>current.result);
+    return disposal=cleanup(()=>current.dispose());
+  };
+  const starting=Promise.resolve(subagents.startActivation({
     provider:AGENT_PROVIDER,
     label:'会议发言建议',
     request:{parent,prompt:[{type:'text',text:agentTask(prompt)}],outputSchema:ADVICE_SCHEMA},
     signal,
     delivery:'caller',
+  })).then(current=>{
+    activation=current;
+    // This handler remains attached after cancellation, so a late child is
+    // still owned and disposed exactly once even if start ignores the signal.
+    if(signal.aborted)void dispose();
+    return current;
   });
   try{
+    const current=await abortable(starting,signal);
     // `result` resolves rather than rejecting on a child-level failure, so every
     // non-`completed` arm has to be mapped to an error here — and a rejected
     // round is what leaves the coach's processed-progress untouched.
-    const result=await activation.result;
+    signal.throwIfAborted();
+    const result=await abortable(current.result,signal);
     if(result.stopReason==='aborted')throw new Error('生成已取消或超时。');
     if(result.stopReason!=='completed')throw new Error(redact(result.diagnostic??'建议未完整生成，请重试。'));
     if(result.structured===undefined)throw new Error('建议未按约定结构返回，请重试。');
@@ -98,7 +133,7 @@ const agentAdvice=async(subagents:NonNullable<OptionalServices['subagents']>,par
   }finally{
     // Every activation owns a child agent and a child session. Leaving one behind per
     // round would accumulate both across a meeting, so disposal is not optional.
-    await activation.dispose().catch(()=>{});
+    await abortable(dispose(),signal);
   }
 };
 
@@ -107,6 +142,7 @@ export const describeAdviceBackend=()=>pinDirect()?'direct（MESH_VOICE_ADVICE=d
 
 export function meetingAdviceModel(ctx:Context):GenerateAdvice {
   return async(input,signal,sessionId)=>{
+    signal.throwIfAborted();
     if(pinDirect())return directAdvice(ctx,input,signal);
     const agents=optionalService<NonNullable<OptionalServices['agents']>>(ctx,'agents');
     const subagents=optionalService<NonNullable<OptionalServices['subagents']>>(ctx,'subagents');

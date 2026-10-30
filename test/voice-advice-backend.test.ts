@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {getEventListeners} from 'node:events';
 import {Context,Service} from '@deepseek-ai/cordis';
 import type {Context as ContextType} from '@deepseek-ai/cordis';
 import {assertObjectJsonSchema,validateJsonSchemaValue} from '@deepseek-ai/dsh-tools';
 import {ADVICE_SCHEMA} from '../src/voice/advice-schema.js';
 import {meetingAdviceModel} from '../src/voice/coach-model.js';
+import {abortable} from '../src/voice/abortable.js';
 
 const payload={summary:'确认发布范围与资源边界。',askedOfMe:[{question:'周五能发布吗？',why:'会邀提到发布时间。',tactfulReply:'我理解大家希望尽快推进。建议先确认验收范围。',conciseReply:'先确认验收范围，再评估时间。',sources:['B_ROLE','T1']}],askOthers:[{question:'验收标准是什么？',purpose:'明确范围',timing:'讨论日期时',sources:['B_INVITE']}],uncertainties:['尚未确认可用资源。'],carryForward:'会议讨论周五发布；用户负责协调，不能承诺额外预算。'};
 const parent={session:{id:'session-a'}};
@@ -119,4 +121,203 @@ test('an empty inject still reaches the optional services — ctx.<name> would t
   assert.equal(failure,undefined,failure instanceof Error?failure.message:String(failure));
   assert.equal(captured,JSON.stringify(payload));
   assert.equal(started.length,1,'the forked path ran without either service being injected');
+});
+
+function deferred<T=void>(){
+  let resolve!:(value:T|PromiseLike<T>)=>void,reject!:(reason:unknown)=>void;
+  const promise=new Promise<T>((yes,no)=>{resolve=yes;reject=no;});
+  return {promise,resolve,reject};
+}
+const turn=()=>new Promise<void>(resolve=>setImmediate(resolve));
+async function promptly<T>(operation:Promise<T>):Promise<T>{
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try{
+    return await Promise.race([operation,new Promise<never>((_,reject)=>{
+      timer=setTimeout(()=>reject(new Error('cancellation or cleanup did not settle promptly')),1000);
+    })]);
+  }finally{clearTimeout(timer);}
+}
+const cancelled=(operation:Promise<unknown>,reason:unknown)=>promptly(assert.rejects(operation,error=>error===reason));
+
+test('abortable preserves values and failures and releases listeners on every settlement',async()=>{
+  const controller=new AbortController(),signal=controller.signal;
+  assert.equal(await abortable(42,signal),42);
+  assert.equal(getEventListeners(signal,'abort').length,0);
+  const success=deferred<string>(),value=abortable(success.promise,signal);
+  assert.equal(getEventListeners(signal,'abort').length,1);
+  success.resolve('done');assert.equal(await value,'done');
+  assert.equal(getEventListeners(signal,'abort').length,0);
+  const failure=deferred<string>(),error=new Error('provider rejected'),failed=abortable(failure.promise,signal);
+  assert.equal(getEventListeners(signal,'abort').length,1);
+  const checked=assert.rejects(failed,rejection=>rejection===error);
+  failure.reject(error);await checked;
+  assert.equal(getEventListeners(signal,'abort').length,0);
+  controller.abort();
+  assert.equal(await value,'done','a later abort cannot change a settled value');
+});
+
+test('abortable cancels an uncooperative operation and observes late resolve or reject',async t=>{
+  for(const late of ['resolve','reject'] as const)await t.test(late,async()=>{
+    const controller=new AbortController(),operation=deferred<string>(),reason=new Error('cancel helper');
+    const result=abortable(operation.promise,controller.signal);
+    assert.equal(getEventListeners(controller.signal,'abort').length,1);
+    const checked=cancelled(result,reason);controller.abort(reason);await checked;
+    assert.equal(getEventListeners(controller.signal,'abort').length,0);
+    if(late==='resolve')operation.resolve('late value');else operation.reject(new Error('late operation rejection'));
+    await turn();
+    await assert.rejects(result,error=>error===reason);
+  });
+});
+
+test('abortable observes already-aborted promises and thenables without retaining listeners',async t=>{
+  for(const late of ['resolve','reject'] as const)await t.test(late,async()=>{
+    const controller=new AbortController(),operation=deferred<string>(),reason=new Error('already cancelled');
+    controller.abort(reason);
+    await cancelled(abortable(operation.promise,controller.signal),reason);
+    assert.equal(getEventListeners(controller.signal,'abort').length,0);
+    if(late==='resolve')operation.resolve('late');else operation.reject(new Error('late after already aborted'));
+    await turn();
+    await cancelled(abortable(Promise.reject(new Error('already rejected')),controller.signal),reason);
+    let observed=false;
+    const thenable={then:(_resolve:unknown,reject:(reason:unknown)=>void)=>{observed=true;reject(new Error('thenable rejected'));}};
+    await cancelled(abortable(thenable as PromiseLike<never>,controller.signal),reason);
+    assert.equal(observed,true);
+    assert.equal(getEventListeners(controller.signal,'abort').length,0);
+  });
+});
+
+test('an already-aborted request starts neither backend nor a parent lookup',async t=>{
+  for(const backend of ['agent','direct'] as const)await t.test(backend,async()=>{
+    const controller=new AbortController(),reason=new Error('cancel before provider');controller.abort(reason);
+    const stub=stubCtx(backend==='agent'?{agent:parent,startActivation:async()=>run({stopReason:'completed',structured:payload})}:{});
+    await cancelled(meetingAdviceModel(stub.ctx)(request,controller.signal,'session-a'),reason);
+    assert.deepEqual(stub.started,[]);assert.deepEqual(stub.lookedUp,[]);
+    assert.deepEqual(stub.stats(),{disposed:0,streamed:0});
+    assert.equal(getEventListeners(controller.signal,'abort').length,0);
+  });
+});
+
+test('a hung activation result cancels immediately even when dispose hangs, and late results stay observed',async t=>{
+  for(const late of ['resolve','reject'] as const)await t.test(late,async()=>{
+    const controller=new AbortController(),reason=new Error('cancel hung result');
+    const result=deferred<any>(),reading=deferred(),disposal=deferred();let disposed=0;
+    const activation={get result(){reading.resolve();return result.promise;},dispose:()=>{disposed++;return disposal.promise;}};
+    const {ctx}=stubCtx({agent:parent,startActivation:async()=>activation});
+    const work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
+    await promptly(reading.promise);controller.abort(reason);await cancelled(work,reason);
+    assert.equal(disposed,1);assert.equal(getEventListeners(controller.signal,'abort').length,0);
+    if(late==='resolve')result.resolve({stopReason:'completed',structured:payload});else result.reject(new Error('late child failure'));
+    await turn();assert.equal(disposed,1);
+    // One cleanup is left forever pending; the other rejects after cancellation.
+    if(late==='reject'){disposal.reject(new Error('late disposal failure'));await turn();}
+    await assert.rejects(work,error=>error===reason);
+  });
+});
+
+test('an activation arriving after cancelled start is disposed exactly once and its result is observed',async t=>{
+  for(const late of ['resolve','reject','already rejected'] as const)await t.test(late,async()=>{
+    const controller=new AbortController(),reason=new Error('cancel hung start');
+    const starting=deferred<any>(),entered=deferred(),disposedSignal=deferred(),result=deferred<any>(),disposal=deferred();let disposed=0;
+    const {ctx}=stubCtx({agent:parent,startActivation:()=>{entered.resolve();return starting.promise;}});
+    const work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
+    await promptly(entered.promise);controller.abort(reason);await cancelled(work,reason);
+    assert.equal(disposed,0);assert.equal(getEventListeners(controller.signal,'abort').length,0);
+    starting.resolve({result:late==='already rejected'?Promise.reject(new Error('unawaited child failure')):result.promise,dispose:()=>{disposed++;disposedSignal.resolve();return disposal.promise;}});
+    await promptly(disposedSignal.promise);assert.equal(disposed,1);
+    if(late==='resolve')result.resolve({stopReason:'completed',structured:payload});
+    if(late==='reject')result.reject(new Error('late abandoned child failure'));
+    disposal.reject(new Error('late abandoned dispose failure'));await turn();
+    assert.equal(disposed,1);await assert.rejects(work,error=>error===reason);
+  });
+});
+
+test('a cancelled start observes its late rejection',async()=>{
+  const controller=new AbortController(),reason=new Error('cancel start before rejection'),starting=deferred<any>();
+  const {ctx}=stubCtx({agent:parent,startActivation:()=>starting.promise});
+  const work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
+  controller.abort(reason);await cancelled(work,reason);
+  starting.reject(new Error('late start rejection'));await turn();
+  assert.equal(getEventListeners(controller.signal,'abort').length,0);
+});
+
+test('a provider aborting during start still has its returned activation disposed once',async()=>{
+  const controller=new AbortController(),reason=new Error('abort inside start');let disposed=0;
+  const {ctx}=stubCtx({agent:parent,startActivation:async()=>{
+    controller.abort(reason);
+    return {result:Promise.reject(new Error('abandoned result')),dispose:()=>{disposed++;throw new Error('sync disposal failure');}};
+  }});
+  await cancelled(meetingAdviceModel(ctx)(request,controller.signal,'session-a'),reason);
+  await turn();assert.equal(disposed,1);
+  assert.equal(getEventListeners(controller.signal,'abort').length,0);
+});
+
+test('cancellation also interrupts disposal already awaited after successful or failed generation',async t=>{
+  for(const stopReason of ['completed','error'] as const)await t.test(stopReason,async()=>{
+    const controller=new AbortController(),reason=new Error('cancel hung disposal'),disposing=deferred(),disposal=deferred();let disposed=0;
+    const {ctx}=stubCtx({agent:parent,startActivation:async()=>({result:Promise.resolve({stopReason,structured:payload,diagnostic:'provider failed'}),dispose:()=>{disposed++;disposing.resolve();return disposal.promise;}})});
+    const work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
+    await promptly(disposing.promise);controller.abort(reason);await cancelled(work,reason);
+    assert.equal(disposed,1);assert.equal(getEventListeners(controller.signal,'abort').length,0);
+    disposal.reject(new Error('cleanup rejected after cancellation'));await turn();
+  });
+});
+
+test('normal success and provider rejection dispose once even when cleanup throws or rejects',async t=>{
+  for(const outcome of ['success','failure'] as const)for(const cleanupFailure of ['throw','reject'] as const)await t.test(`${outcome} / ${cleanupFailure}`,async()=>{
+    const error=new Error('provider result rejected');let disposed=0;
+    const {ctx}=stubCtx({agent:parent,startActivation:async()=>({
+      result:outcome==='success'?Promise.resolve({stopReason:'completed',structured:payload}):Promise.reject(error),
+      dispose:()=>{disposed++;if(cleanupFailure==='throw')throw new Error('sync dispose failure');return Promise.reject(new Error('async dispose failure'));},
+    })});
+    const controller=new AbortController(),work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
+    if(outcome==='success')assert.equal(await work,JSON.stringify(payload));else await assert.rejects(work,rejection=>rejection===error);
+    assert.equal(disposed,1);assert.equal(getEventListeners(controller.signal,'abort').length,0);await turn();
+  });
+});
+
+test('direct next ignores abort but cancellation returns without waiting for iterator return',async t=>{
+  for(const late of ['resolve','reject'] as const)for(const returnKind of ['hang','throw','reject'] as const)await t.test(`${late} / return ${returnKind}`,async()=>{
+    const controller=new AbortController(),reason=new Error('cancel hung next'),next=deferred<any>(),entered=deferred(),closing=deferred();let reads=0,returned=0;
+    const iterator={
+      [Symbol.asyncIterator](){return this;},
+      next(){reads++;if(reads===1)return Promise.resolve({done:false,value:{type:'text-delta',text:'partial'}});entered.resolve();return next.promise;},
+      return(){returned++;if(returnKind==='throw')throw new Error('sync return failure');if(returnKind==='reject')return Promise.reject(new Error('async return failure'));return closing.promise;},
+    };
+    const {ctx,stats}=stubCtx({stream:()=>iterator});
+    const work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
+    await promptly(entered.promise);controller.abort(reason);await cancelled(work,reason);
+    assert.equal(returned,1);assert.equal(reads,2);assert.equal(stats().streamed,1);
+    assert.equal(getEventListeners(controller.signal,'abort').length,0);
+    if(late==='resolve')next.resolve({done:false,value:{type:'finish',reason:{kind:'stop'}}});else next.reject(new Error('late next failure'));
+    await turn();assert.equal(reads,2);assert.equal(returned,1);
+    if(late==='reject'&&returnKind==='hang'){closing.reject(new Error('late return failure'));await turn();}
+    await assert.rejects(work,error=>error===reason);
+  });
+});
+
+test('direct cancellation can interrupt return already awaited after a stream error',async()=>{
+  const controller=new AbortController(),reason=new Error('cancel hung iterator cleanup'),returning=deferred(),closing=deferred();let returned=0;
+  const iterator={
+    [Symbol.asyncIterator](){return this;},
+    next:async()=>({done:false,value:{type:'finish',reason:{kind:'error',failure:{message:'provider failure'}}}}),
+    return:()=>{returned++;returning.resolve();return closing.promise;},
+  };
+  const {ctx}=stubCtx({stream:()=>iterator});const work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
+  await promptly(returning.promise);controller.abort(reason);await cancelled(work,reason);
+  assert.equal(returned,1);assert.equal(getEventListeners(controller.signal,'abort').length,0);
+  closing.reject(new Error('late failed iterator return'));await turn();
+});
+
+test('direct failures keep their error mapping and close the iterator',async t=>{
+  for(const [reason,message] of [
+    [{kind:'error',failure:{message:'boom sk-secretvalue'}},/boom \[hidden\]/],
+    [{kind:'aborted'},/取消|超时/],
+    [{kind:'length'},/未完整生成/],
+  ] as const)await t.test(reason.kind,async()=>{
+    let returned=0;
+    const {ctx}=stubCtx({stream:()=>({async *[Symbol.asyncIterator](){try{yield {type:'finish',reason};}finally{returned++;}}})});
+    const controller=new AbortController();
+    await assert.rejects(meetingAdviceModel(ctx)(request,controller.signal,'session-a'),message);
+    assert.equal(returned,1);assert.equal(getEventListeners(controller.signal,'abort').length,0);
+  });
 });

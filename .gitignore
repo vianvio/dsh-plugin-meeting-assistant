@@ -8,3 +8,6 @@ dist/
 
 # 本机录音/转写/会前准备的临时目录（`scripts/voice-live.ts` 往这里落）与端到端抓到的真实 ASR 结果。
 .local/
+
+# browser-harness 的本项目后台标签页归属。
+.browser/

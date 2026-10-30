@@ -1,12 +1,12 @@
 export const COACH_RULE={characters:500,intervalMs:5*60_000,cooldownMs:60_000} as const;
 export interface ReferenceFile {path:string;size:number;text:string;truncated:boolean;savedAt:number}
 export interface MeetingBrief {
-  invitation:string;role:string;initialViews:string;cwd:string;filePaths:string[];
+  invitation:string;goal:string;role:string;initialViews:string;cwd:string;filePaths:string[];
   autoEnabled:boolean;revision:number;updatedAt:number;files:ReferenceFile[];
 }
-export interface BriefDraft {invitation:string;role:string;initialViews:string;filePaths:string[];autoEnabled:boolean}
+export interface BriefDraft {invitation:string;goal?:string;role:string;initialViews:string;filePaths?:string[];autoEnabled:boolean}
 export type PublicBrief=Omit<MeetingBrief,'files'> & {files:Array<Omit<ReferenceFile,'text'> & {characters:number}>};
-export const EMPTY_BRIEF:MeetingBrief={invitation:'',role:'',initialViews:'',cwd:'',filePaths:[],autoEnabled:true,revision:0,updatedAt:0,files:[]};
+export const EMPTY_BRIEF:MeetingBrief={invitation:'',goal:'',role:'',initialViews:'',cwd:'',filePaths:[],autoEnabled:true,revision:0,updatedAt:0,files:[]};
 export interface Evidence {id:string;label:string;excerpt:string}
 interface AskedQuestion {question:string;why:string;tactfulReply:string;conciseReply:string;sources:string[]}
 interface AskQuestion {question:string;purpose:string;timing:string;sources:string[]}

@@ -1,128 +1,158 @@
-# DSH 会议助手插件（dsh-plugin-meeting-assistant）
+<div align="center">
 
-本机录音 + 实时转写 + 会前准备 + 会中发言建议。**独立插件仓库**：不依赖 Agent Mesh、平台连接、
-Bridge，也不依赖任何别的 DSH 插件。
+# DSH 会议助手 🎙️
 
-它原来是 `dsh-plugin-agent-mesh` 的一部分（0.2.0～0.6.0 之间的版本里都有）。第一次拆分（2026-10-29）
-把它搬到 `slf/agent-mesh/desktop/plugins/plugin-meeting`，但它仍靠那个仓库的构建脚本、共享源码层
-和测试夹具活着；这一次（本仓库）拆到底：构建、共享源码、`voice-kernel`、测试全部跟着走，仓库里
-只剩它自己的东西。
+**在 DSH 里录下讨论，结合项目资料准备追问和回答。**
 
-## 仓库长什么样
+[安装](#安装) · [使用](#使用) · [项目资料与-ai](#项目资料与-ai) · [数据与边界](#数据与边界) · [开发](#开发)
 
-| 目录 | 是什么 | 能不能改 |
+[![npm](https://img.shields.io/npm/v/dsh-plugin-meeting-assistant?label=npm)](https://www.npmjs.com/package/dsh-plugin-meeting-assistant) · [![license](https://img.shields.io/badge/license-MIT-success)](LICENSE) · ![DSH](https://img.shields.io/badge/DSH-plugin-4B6BFB)
+
+</div>
+
+会议助手直接装进 DeepSeek Harness：聊天输入框旁的一个入口，完成会前准备、麦克风录音、实时转写和会中辅助。录音、文字与会议背景保存在本机，历史记录可以回看和导出。
+
+它可以独立安装。录音与转写由本插件提供，会中建议结合当前项目、你的会议目标和最近讨论生成。
+
+| 会前 | 会中 | 会后 |
 | --- | --- | --- |
-| `src/index.ts`、`src/voice/**` | 插件自己：宿主半入口、录音服务、ASR 连接、发言建议、`voice_log` 工具、RPC 通道、客户端界面 | 是，这是本仓的主体 |
-| `src/shared/**` | 拆包时从 `agent-mesh/desktop/plugins/plugin-shared/` **拷进来的一份**（诊断、RPC 调用/通道、宿主作用域、dock、主题、宿主词表） | 谨慎：上游还有一份在 Agent Mesh 仓里，见下 |
-| `src/vendor/voice-kernel/**` | 从 `agent-mesh/packages/voice-kernel` 拷进来的 ASR 协议与重连内核（`.mjs` + `.d.mts`） | 谨慎：同上，副本 |
-| `test/**` | 单元测试（含 `test/voice-kernel/` 里那份内核单测） | 是 |
-| `lib/**` | 构建产物（`npm run build` 生成，不进版本库） | 否 |
-
-### 关于 `src/shared` 与 `src/vendor` 这两份副本
-
-它们**不是依赖**，是源码复制：插件要能单独 checkout、单独 `npm install`、单独构建，所以不能对着
-另一个仓库的相对路径 import。代价是同一份代码在两处演化——所以：
-
-* 这两个目录**不跟着上游自动更新**。上游（Agent Mesh 仓）改了共享层，这里不会知道。
-* 真要同步时，把上游的改动**手工搬过来**，然后跑 `npm test`：`test/package-boundary.test.ts` 会
-  盯住"源码里不许出现仓库外的相对 import"，`test/host-inject.test.ts` 会盯住 inject 与共享层里
-  真正用到的服务对得上。
-* 副本的来处写在 `src/shared/README.md`、`src/vendor/voice-kernel/README.md`（含拆分时的上游提交）。
-
-## 两半，与"改完怎么生效"
-
-| 产物 | 跑在哪 | 改完怎么生效 | 要重启 DSH 吗 |
-| --- | --- | --- | --- |
-| `src/client.tsx` → `lib/client.js`（会议开关、转写面板、语音设置） | 渲染进程 | `npm run dev` 重建 → DSH 的客户端插件 HMR 接收器接住 | **不用** |
-| `src/index.ts`、`src/voice/*`（录音服务、ASR 连接、发言建议、`voice_log` 工具、RPC 通道） | DSH 宿主进程 | 宿主半是 ESM 一次导入的模块，DSH Desktop 又有意禁用了内部 loader 的缓存清理，没有任何重载路径 | **要** |
-
-宿主半每次加载会打一行 `[meeting-assistant-host <ISO 时间>]`（走 stderr）。"现在跑的是哪一份代码"
-有一个能直接看到的答案，不用猜：宿主把宿主子进程的 stdout 直接 pipe、没有落盘出口，所以那一行停在
-启动它的终端里（插件自己另有一路诊断文件：`~/.agent-mesh/voice/` 下的 JSONL，见 `src/shared/diag-file.ts`）。
-
-## 三个入口
-
-| 入口 | 槽位 | 干什么 |
-| --- | --- | --- |
-| 输入框旁的开关（麦克风 + 「转写」） | `conversation.input.left` | 开始/结束录音，打开转写面板 |
-| 侧栏那一根栏里的「会议」标签页 | `shell.overlay` → `DockHost` | 会前准备 / 实时转写 / 发言建议 |
-| 设置里的「会议语音」 | `settings.section` | 百炼 API Key、WebSocket 地址、模型 |
-
-侧栏那一根栏是**插件之间共用**的：名单挂在全局对象上（`src/shared/dock/dock-store.ts`），谁先
-加载谁建，栏本身只有一个宿主。所以装了别的、也用这根栏的插件时，两边是同一根栏里的两个标签页；
-**只装本插件时它照样开得出栏**——`DockHost` 不依赖任何别的插件。
-
-## 数据放在哪
-
-- 录音、转写、会前准备：`MESH_VOICE_HOME`，默认 `~/.agent-mesh/voice`。
-- 语音识别凭据：同上目录下的配置文件，保存时落盘权限收紧（`0600`），接口回显时不含密钥。
-
-目录名保留 `agent-mesh` 是**有意**的：改名会让已经录过的会议在升级后"消失"。共享的只有这一个
-路径常量。
-
-## 宿主半声明的服务
-
-`export const inject = ['tools', 'connection', 'webServer', 'llm']`——`inject` 是加载门槛，少一个就在
-加载阶段抛异常、整个 profile 起不来。
-
-- `connection` + `webServer`：会议界面走一条 RPC 通道（`/meeting-assistant`），首选插件自己往
-  `webServer` 挂前缀路由（用 DSH 自己的信任检查），失败才退回 `ctx.connection.rpc.handle`。DSH 把
-  `webServer` 隔离了，只有**顶层 inject 声明过**的 fiber 看得见它，所以这条必须写在这里。
-- `tools`：注册 `voice_log`（模型读会议记录的唯一入口）。
-- `llm`：发言建议的直调回落路径（`src/voice/coach-model.ts` 的 `ctx.llm.stream`）用；cordis 的服务
-  方法里 `this.ctx` 会换回**调用方**的 ctx，被调服务内部读什么，调用方就得声明什么。
-- **故意不声明** `agents` / `subagents`：发言建议优先 fork 一个子 agent，但部署里没有 subagent 供给
-  时应该回落到单次直调，而不是整个插件加载不了。运行时探测，见 `src/voice/coach-model.ts`。
-
-`test/host-inject.test.ts` 按宿主半的 import 闭包扫一遍 `ctx.<服务>`，与这份 `inject` 对不上就红。
-
-## 测试
-
-```bash
-npm install        # 装 devDependencies（DSH 那几个包钉在 0.2.1-rc.4：peer 范围是给"装插件的那台机器"看的，
-                   #   dev 里钉死同一代，npm 自动补 peer 时才不会与 devDeps 互相打架）
-npm run build      # 打 lib/index.js + lib/client.js
-npm test           # pretest 会先 build；跑 test/*.test.ts 与 test/voice-kernel/*.mjs
-npm run typecheck  # tsc --noEmit
-npm run check      # 上面两个一起
-```
-
-| 文件 | 覆盖 |
-| --- | --- |
-| `test/voice.test.ts` | 重采样/PCM、配置隐私与 TLS 强制、录音生命周期、RPC 重试去重、会话隔离、`voice_log` 只读工具 |
-| `test/voice-context.test.ts` | 转写上下文注入：快照边界、role/source/form、节流、收尾必推、无 live agent 静默跳过 |
-| `test/voice-advice-backend.test.ts` | 发言建议的两条后端：schema 强制子集、agent 路径的父级与 schema、停止原因映射、run 必 dispose、回落直调 |
-| `test/meeting-coach.test.ts` | 会前准备与建议落盘：`.docx`/`.xlsx` 抽取、私有写入、建议解析 |
-| `test/meeting-host-isolation.test.ts` | 只 import 宿主半**不许**执行插件入口的副作用（模块级日志与 20 秒看门狗） |
-| `test/host-inject.test.ts` | 两半的 `inject` 与它们真正用到的服务对得上（漏一个就是整台机器起不来） |
-| `test/plugin-routes.test.ts` | 注册自己的 `/meeting-assistant` 通道、不认调用方给的路径 |
-| `test/client-entry.test.ts` | 客户端半的**源码**入口真的加载一次，并认领它广告的槽位 |
-| `test/client-bundle.test.ts` | 客户端**产物**按 DSH 加载器跑一次，且只用 `inject` 里声明的服务 |
-| `test/host-bundle.test.ts` | 宿主**产物**的导出（`name`/`inject`/`apply`/`hostBuild`）与注入的版本号 |
-| `test/package-boundary.test.ts` | 源码里不许有仓库外的相对 import；manifest 里不许有 `file:` 依赖；产物里不许有别的插件的痕迹 |
-| `test/compat-session-v4.test.ts` | 真的注入消息必须能被会话格式 v4 的编码器接受（`kind:'plugin'` 那套写法仍被拒收） |
-| `test/import-graph.test.ts`、`test/client-boundary.test.ts`、`test/dock.test.ts` | 无环、客户端半不取 Node 内建、栏的落点与配色 |
-| `test/voice-kernel/*.test.mjs` | vendored 内核：run-task 协议、断线重连、重喂查重、WAV 头 |
-
-真实 ASR 的一轮生成需要凭据，不在 `npm test` 里（那台机器上没有百炼 Key）：
-
-```bash
-# 用 macOS 的 say + ffmpeg 合成一段语音，边录边读，把结果写进 .local/
-node --import tsx scripts/voice-live.ts
-```
-
-会议功能的完整设计说明（转写链路、发言建议的两条后端、上下文注入的两条路径）见
-[docs/VOICE.md](docs/VOICE.md)。
+| 填写会邀和目标，按需润色 | 追问 / 回应 / 转写三个视图 | 回看录音、转写和分析记录 |
+| 当前项目自动作为资料范围 | 收起面板、切换聊天仍继续录音 | 导出完整文字记录 |
 
 ## 安装
 
-插件的产物是两半 JS 加一条 cordis patch。装进某个 DSH profile：
+### 从 npm 装到 DSH
 
 ```bash
-npm install                    # `npm pack` 会跑 prepare（= `npm run build`），所以要装齐 devDependencies
-npm pack                       # 得到 dsh-plugin-meeting-assistant-<version>.tgz（带 lib/）
-dsh plugin --profile <profile> add ./dsh-plugin-meeting-assistant-<version>.tgz
+dsh plugin --profile desktop add dsh-plugin-meeting-assistant --registry=https://registry.npmjs.org/
 ```
 
-`dsh plugin add` 会写进 profile 的 dependencies 并自动挂到 `dsh.profile.bundles`，不需要别的安装器。
-宿主半（`inject` 里的那四个服务）由 DSH 本体提供；识别后端要自己在设置里填百炼 API Key。
+`--profile` 填你实际使用的配置：桌面端通常是 `desktop`，Web 端是 `web`。这条命令从 npm 安装插件，并自动把它加入 profile 的 `dsh.profile.bundles`。
+
+npm 包已带编译好的客户端和宿主代码，安装时无需克隆仓库或自己构建。**安装后完整退出并重新打开 DSH**，聊天输入框旁会出现「会议助手」，设置中会出现「会议语音」。
+
+要求 DSH 提供 0.2.1 系列插件 API，具体 peer 范围见 [package.json](package.json)。本地验证环境为 macOS 上的 DSH Desktop 0.2.1-rc.5。
+
+<details>
+<summary>终端找不到 dsh 命令？</summary>
+
+macOS 上，DeepSeek Harness 安装在 `/Applications` 时，可以直接使用应用内置命令：
+
+```bash
+"/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" plugin --profile desktop add dsh-plugin-meeting-assistant --registry=https://registry.npmjs.org/
+```
+
+</details>
+
+### 升级
+
+```bash
+dsh plugin --profile desktop update dsh-plugin-meeting-assistant --registry=https://registry.npmjs.org/
+```
+
+升级后同样完整重启 DSH。前后端版本不一致时，会议面板会提示重新打开应用。
+
+如果此前通过本地 `.tgz` 或 `link:` 安装，执行下面这条命令切换到 npm 版本：
+
+```bash
+dsh plugin --profile desktop add dsh-plugin-meeting-assistant@latest --registry=https://registry.npmjs.org/
+```
+
+### 卸载
+
+```bash
+dsh plugin --profile desktop remove dsh-plugin-meeting-assistant
+```
+
+## 使用
+
+### 1. 配置转写服务
+
+打开「设置 → 会议语音」，填写百炼 API Key，以及对应服务的流式 WebSocket 地址和模型名。地址与模型收在「服务地址与模型」中，也可以导入已有的 `.env` 或 JSON 配置。
+
+插件使用 DashScope `run-task` 流式识别协议，请使用支持该协议的服务参数。转写服务按音频时长计费。
+
+AI 建议和目标润色使用 DSH 的模型服务，配置方式见下方[项目资料与 AI](#项目资料与-ai)。
+
+### 2. 准备会议
+
+点击输入框旁的「会议助手」。会邀和会议目标直接展示，均可留空；角色与立场放在「更多背景」中。
+
+当前会话所在项目自动作为资料范围，无需选择文件。填写目标后，可以点击「AI 润色」获取 2–3 个候选，选择并点击「采用」才替换原文。打开面板、打字和开始录音都不会自动润色。
+
+### 3. 开始录音
+
+点击「开始录音」时才申请麦克风权限。等待授权可以取消，之后迟到的授权也不会自动恢复已取消的录音。
+
+录音中，面板顶部显示时长、音量与结束操作；主区域通过三个视图切换：
+
+- **追问**：结合讨论和项目资料，查看可提出的问题及依据。
+- **回应**：展开可能被问到的问题，查看简短或展开的回答参考。
+- **转写**：查看逐句原文，按需加载更早的内容。
+
+新建议到达时，点击「有新建议，点击查看」才切换版本，正在阅读的卡片会保留。自动分析可在右上角菜单调整，也可以手动更新或取消分析。取消只结束本次分析，录音继续。
+
+### 4. 结束与回看
+
+收起面板或切换聊天时，录音继续；点击「结束」才停止。每场会议属于发起录音的会话，全应用同时只录一场。
+
+结束后停留在本场记录。右上角菜单提供历史记录、文字导出、会议背景和语音设置。也可以在原聊天里问“刚才讨论的结论是什么”，让 Agent 通过 `voice_log` 读取本会话的记录。
+
+## 项目资料与 AI
+
+项目目录是会议的默认资料范围。生成建议或润色目标时，插件才按会邀、目标和当前讨论检索相关内容，包括代码、文档、隐藏的 `.notes` 和 Word 文档；目录索引和内容片段有读取预算，依赖、构建目录和二进制内容会按规则跳过。
+
+这表示整个项目可作为检索范围，不能等同于模型已经读完每个文件。每次生成会重新读取当前相关内容。旧会议中的文件快照仍可读取。
+
+| 功能 | 模型路径 |
+| --- | --- |
+| 会中建议 | 当前主 Agent 在线且支持子 Agent 时，继承当前会话模型生成 |
+| 会中建议的直调回落 | DSH 的 `deepseek-official / deepseek-flash` |
+| 目标润色 | 用户点击后调用 DSH 的 `deepseek-official / deepseek-flash` |
+
+需要在 DSH 配置相应的 DeepSeek 模型服务。建议只展示在面板中，由用户选择是否采用，不会自动代用户发言。
+
+录音运行时支持短暂宿主重载后的接续。音频和停止请求遇到短暂路由不可用时会有限重试；取消分析会立即释放任务状态，迟到结果不会覆盖新的分析。
+
+## 数据与边界
+
+- **本机保存**：录音、转写、会前背景和分析记录默认位于 `~/.agent-mesh/voice`，可用 `MESH_VOICE_HOME` 更改。目录名沿用拆分前的位置，升级可以继续读取原有记录。
+- **服务调用**：麦克风音频发送至配置的百炼转写服务；背景、相关项目片段和转写会交给对应的 DSH 模型服务。
+- **凭据**：语音配置保存在本机，接口不回显密钥，配置文件权限为 `0600`。
+- **音源**：当前直接采集麦克风，不直接采集系统声音；线上会议使用耳机时，需要自行确认麦克风能采到所需声音。
+- **浏览器**：Web 端需要 HTTPS 或 localhost 等安全上下文，并允许访问麦克风。
+- **中断恢复**：应用退出或刷新后停止采集，已落盘的音频与转写会保留；中断期间不会补录。部分音频未完成转写时，面板会提示。
+- **诊断**：插件诊断日志默认在 `~/.agent-mesh/logs`。详细协议、上下文路径与恢复行为见 [设计说明](docs/VOICE.md)。
+
+## 开发
+
+使用 Node.js 24 和本仓库锁定的依赖：
+
+```bash
+git clone https://github.com/vianvio/dsh-plugin-meeting-assistant.git
+cd dsh-plugin-meeting-assistant
+npm ci
+npm run check
+```
+
+本地开发安装：
+
+```bash
+dsh plugin --profile desktop add "link:$PWD"
+npm run dev
+```
+
+客户端修改可由 DSH 的 HMR 接收；宿主代码修改或发版升级后，完整重启可以确认加载到同一版本。
+
+```bash
+npm run build       # 生成 lib/index.js 和 lib/client.js
+npm test            # 先构建，再跑 Node 测试与 ASR 内核测试
+npm run typecheck   # TypeScript 检查
+npm run test:ui     # 可选：真实组件 + 模拟音频/RPC 的浏览器回归
+```
+
+`test:ui` 需要本机安装并连接 `browser-harness`；不请求真实麦克风或模型。源码目录、服务依赖与共享内核说明见 [开发与维护](docs/DEVELOPMENT.md)。
+
+## 许可与来源
+
+[MIT](LICENSE)。会议助手从 Agent Mesh 拆分为独立插件；共享层和语音内核的来源分别记录在 [src/shared/README.md](src/shared/README.md) 与 [src/vendor/voice-kernel/README.md](src/vendor/voice-kernel/README.md)。

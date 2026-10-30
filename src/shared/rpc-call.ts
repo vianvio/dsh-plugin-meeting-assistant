@@ -1,85 +1,97 @@
-/**
- * 客户端半 → 宿主半的那一次 `rpc.call`：**只有这一份实现**。
- *
- * 两个插件的客户端半各写了一遍同样的十来行（取 deadline、翻译错误、记一行日志、拆 `result.ok`），
- * 只有一份带 deadline——于是同一个"传输卡住了"在会议助手那里 30 秒后给出一句话，在 mesh 那里
- * 永远不返回：输入框旁的开关停在 `busy` 的"连接中…"且一直 disabled（`finally` 永远不会执行），
- * 日志同步的 `syncing` 也再不释放，只能刷新页面。
- *
- * 三个后果都在这里一次做完，调用方只给"这条通道是谁"：
- *
- * * **每一条调用都带上限**（`AbortSignal.timeout`）——上限是必须的，不是可选优化；
- * * 失败翻译成能照着做的提示（`describeRpcFailure`）；
- * * 每次调用记一行（成功限流、失败逐条），诊断报告里的 `rpc` 那一类就是它。
- */
-import {describeRpcFailure} from './rpc-error.js';
+/** Shared client RPC calls: one deadline, opt-in route recovery, and one final result. */
+import {describeRpcFailure, isRetryableRpcFailure} from './rpc-error.js';
 import {logRpc, type DiagLog} from './diag.js';
 
-/** 宿主半的 RPC 结果：`ok:false` 时 `error.message` 是给人看的那句话。 */
 export interface RpcResult {
   ok: boolean;
   value?: unknown;
   error?: {message: string};
 }
 
-/** 只要 `call` 这一个方法：`ctx.connection.rpc` 满足它，测试里的替身也满足它。 */
 export interface RpcTransport {
   call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult>;
 }
 
-export interface RpcCallOptions {
-  transport: RpcTransport;
-  /** 逻辑通道，例如 `/agentmesh`。 */
-  channel: string;
-  /** 这条通道属于哪个插件，用于错误提示，例如 `Agent Mesh`。 */
-  label: string;
-  /** 宿主半加载时往 stderr 打的那一行前缀。 */
-  marker: string;
-  diag: DiagLog;
-  /** 默认上限（毫秒）。**必填**：没有上限的调用会把界面卡死，不给默认值。 */
-  defaultDeadlineMs: number;
-  /** 少数需要更久的端点。例外写在这里，而不是把默认值调大。 */
-  deadlines?: Record<string, number>;
+export interface RpcRetryOptions {
+  /** Exact endpoint names whose requests the caller knows are safe to repeat. */
+  endpoints: readonly string[];
+  /** One wait before each additional attempt; an empty list disables retries. */
+  delaysMs: readonly number[];
 }
 
+export interface RpcCallOptions {
+  transport: RpcTransport;
+  channel: string;
+  label: string;
+  marker: string;
+  diag: DiagLog;
+  /** Total time for the request, including every attempt and retry wait. */
+  defaultDeadlineMs: number;
+  deadlines?: Record<string, number>;
+  /** Disabled by default. Only thrown HTTP 404/405/502/503 failures qualify. */
+  retry?: RpcRetryOptions;
+}
 
-/** 这条端点该用哪个上限。默认值不是"随便挑一个"：调用方必须显式给出。 */
 export function rpcDeadlineMs(endpoint: string, options: Pick<RpcCallOptions, 'defaultDeadlineMs' | 'deadlines'>): number {
   return options.deadlines?.[endpoint] ?? options.defaultDeadlineMs;
 }
 
-/**
- * 造一个 `call`：调用方拿到的是一个 `(endpoint, payload) => Promise<value>`。
- *
- * `AbortSignal.timeout()` 到点会让 `transport.call` 抛出来（`The operation was aborted due to
- * timeout`），这里把它连同"通道没人接"一起交给 `describeRpcFailure` 翻译——**超时不是
- * "宿主半没上线"**，两者给人指的方向不同。
- */
+/** Enforce the deadline even when a transport does not observe its signal. */
+function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  let onAbort!: () => void;
+  const cancellation = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, {once: true});
+    if (signal.aborted) onAbort();
+  });
+  return Promise.race([operation, cancellation]).finally(() => signal.removeEventListener('abort', onAbort));
+}
+
+async function retryWait(delayMs: number, signal: AbortSignal): Promise<void> {
+  let timer!: ReturnType<typeof setTimeout>;
+  try {
+    await withAbort(new Promise<void>(resolve => { timer = setTimeout(resolve, delayMs); }), signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function createRpcCall(options: RpcCallOptions): (endpoint: string, payload?: unknown) => Promise<any> {
-  const {transport, channel, label, marker, diag, defaultDeadlineMs, deadlines} = options;
+  const {transport, channel, label, marker, diag, retry} = options;
+  const retryEndpoints = new Set(retry?.endpoints);
+  const retryDelays = [...(retry?.delaysMs ?? [])];
+  if (retryDelays.some(delay => !Number.isSafeInteger(delay) || delay < 0 || delay > 2_147_483_647)) {
+    throw new RangeError('RPC retry delays must be nonnegative timer-safe integers');
+  }
   return async (endpoint, payload = {}) => {
     const started = Date.now();
+    const controller = new AbortController();
+    const {signal} = controller;
+    const timer = setTimeout(() => controller.abort(new DOMException('RPC request timed out', 'TimeoutError')), rpcDeadlineMs(endpoint, options));
+    const delays = retryEndpoints.has(endpoint) ? retryDelays : [];
     let result: RpcResult;
     try {
-      result = await transport.call(channel, endpoint, payload, AbortSignal.timeout(rpcDeadlineMs(endpoint, {defaultDeadlineMs, deadlines})));
+      for (let attempt = 0; ; attempt++) {
+        signal.throwIfAborted();
+        try {
+          result = await withAbort(transport.call(channel, endpoint, payload, signal), signal);
+          break;
+        } catch (error) {
+          if (signal.aborted) throw signal.reason;
+          const delayMs = delays[attempt];
+          if (delayMs === undefined || !isRetryableRpcFailure(error)) throw error;
+          diag.warn('rpc', `${endpoint} 暂时不可用，等待重试`, {retry: attempt + 1, delayMs, error: error instanceof Error ? error.message : String(error)});
+          await retryWait(delayMs, signal);
+        }
+      }
     } catch (error) {
-      /**
-       * 传输层自己抛错（通道没人接的 HTTP 405、`AbortSignal` 超时……）这一支**也必须留痕**。
-       *
-       * 以前这里直接抛出去，一条日志都不写——于是 `diag.ts` 立项起因的那次事故（界面上只有一句
-       * `transport failure for /agentmesh/panel/state: HTTP 405`、报告里什么都没有）会**原样重演**：
-       * 用户看到的那一句来自这里，而它恰恰是唯一没被记下来的一类失败。
-       *
-       * 两件事按顺序做，顺序不能换：
-       *  1. 先取翻译后的 `message`，再记日志——日志里那句和用户看到的那句必须是**同一条**，
-       *     否则报告与界面各说各话，对不上号；
-       *  2. 抛的还是 `describeRpcFailure` 返回的那个错误对象本身（类型、message、堆栈都不变），
-       *     所以这次改动对外只多了一行日志。
-       */
       const failure = describeRpcFailure(error, {label, channel, endpoint, marker});
       logRpc(diag, endpoint, {ok: false, ms: Date.now() - started, error: failure.message});
       throw failure;
+    } finally {
+      clearTimeout(timer);
     }
+    // Application failures are responses, not route failures, even if their text mentions HTTP.
     if (!result.ok) {
       const message = result.error?.message ?? `${channel}/${endpoint} 失败`;
       logRpc(diag, endpoint, {ok: false, ms: Date.now() - started, error: message});

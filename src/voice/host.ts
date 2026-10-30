@@ -12,11 +12,11 @@ import { diagnosticId as diagConsumerId, formatReport, logRpc } from '../shared/
 import {defineTool} from '@deepseek-ai/dsh-tools';
 import {publicConfig,saveConfig,voiceHome} from './config.js';
 import {MeetingService} from './service.js';
-import {MeetingStore,type MeetingMeta} from './store.js';
-import {MeetingCoach} from './coach.js';
+import {acquireMeetingRuntime} from './runtime.js';
 import {meetingAdviceModel,describeAdviceBackend} from './coach-model.js';
-import {MeetingContextFeed} from './context.js';
 import {listMeetingFiles} from './brief.js';
+import {createGoalPolisher} from './goal-polish.js';
+import {redactCredentials} from './project-context.js';
 // 日志从**叶子模块**取，不从插件入口取：入口是有副作用的模块（模块级会写日志、挂加载看门狗），
 // 而宿主半的每个文件都 import 它就会构成运行期循环，只 import 宿主半也会执行入口的模块级语句。
 import { diag } from './host-diag.js';
@@ -51,25 +51,12 @@ export function installVoice(ctx:Context){
   // answer depends on whether the session's agent happens to be live, so say it
   // once where the logs are already being read for the build marker.
   console.warn(`[meeting-assistant] 发言建议后端：${describeAdviceBackend()}`);
-  const coach=new MeetingCoach(new MeetingStore(voiceHome()),meetingAdviceModel(ctx));
-  const safeAdvice=(meta:MeetingMeta,work:()=>void)=>{try{work();}catch(error){try{coach.reportError(meta,error);}catch{ctx.logger?.warn('会议建议状态暂时无法保存');}}};
-  // Assigned right after the service, which owns the store the feed reads. No
-  // hook can fire before `start()` returns, and `refresh` re-checks that a live
-  // agent exists, so the two-step wiring costs nothing at the call sites.
-  let feed:MeetingContextFeed|undefined;
-  const syncContext=(meta:MeetingMeta)=>{
-    if(!feed)return;
-    void feed.refresh(meta).catch(error=>ctx.logger?.warn(`会议上下文未同步到会话：${error instanceof Error?error.message:String(error)}`));
-  };
-  const service=new MeetingService(voiceHome(),undefined,{
-    started:meta=>{coach.started(meta);feed?.forget(meta.sessionId);syncContext(meta);},
-    transcribed:(meta,entry)=>safeAdvice(meta,()=>coach.transcribed(meta,entry)),
-    tick:meta=>{safeAdvice(meta,()=>coach.tick(meta));syncContext(meta);},
-    stopped:meta=>syncContext(meta),
-  });
-  feed=new MeetingContextFeed(service.store,ctx);
+  const runtime=acquireMeetingRuntime(voiceHome(),ctx,meetingAdviceModel(ctx));
+  const {service,coach}=runtime;
+  const polishGoal=createGoalPolisher(ctx);
+  // Model/default-profile changes release this application, not the in-progress recording.
+  ctx.effect(()=>runtime.release,'meeting-assistant: release this plugin application');
   ctx.tools.register(voiceLogTool(service));
-  ctx.effect(()=>async()=>{await coach.dispose();await service.dispose();},'meeting-assistant: finalize meeting recording and cancel advice');
   /**
    * 装通道：首选插件自己挂 webServer 路由，失败退回 DSH 的 connection（见 plugins/plugin-shared/rpc-channel.ts）。
    *
@@ -115,7 +102,7 @@ export function installVoice(ctx:Context){
         const text=formatReport({plugin:'dsh-plugin-meeting-assistant',version:PLUGIN_VERSION,diagnosticId:typeof p.diagnosticId==='string'?p.diagnosticId:typeof p.consumerId==='string'?p.consumerId:diagConsumerId(),extra:{录音目录:service.root},entries:diag.list()});
         return {ok:true,value:{text}};
       }
-      if(endpoint==='config')return {ok:true,value:publicConfig(service.root)};
+      if(endpoint==='config')return {ok:true,value:{...publicConfig(service.root),hostVersion:PLUGIN_VERSION}};
       if(endpoint==='save'){
         if(service.active)throw new Error('请先停止录音，再修改语音识别设置。');
         return {ok:true,value:saveConfig(service.root,p)};
@@ -132,18 +119,25 @@ export function installVoice(ctx:Context){
       }
       if(endpoint==='status'){
         const status=await service.status(p.sessionId,p.recordingId);
-        return {ok:true,value:{...status,coach:status.result?coach.status(status.result.recording):null}};
+        return {ok:true,value:{...status,hostVersion:PLUGIN_VERSION,coach:status.result?coach.status(status.result.recording):null}};
+      }
+      if(endpoint==='brief/polish'){
+        // During recording the confirmed brief, rather than a changed UI session, owns cwd.
+        const active=service.active?.meta;
+        const recordingId=p.recordingId??(active?.sessionId===p.sessionId?active.id:undefined);
+        const cwd=recordingId?coach.briefs.read(p.sessionId,recordingId).cwd:p.cwd;
+        return {ok:true,value:await polishGoal({sessionId:p.sessionId,recordingId,cwd,invitation:p.invitation,goal:p.goal,role:p.role,initialViews:p.initialViews})};
       }
       if(endpoint==='brief/get')return {ok:true,value:coach.briefs.public(coach.briefs.read(p.sessionId,p.recordingId))};
       if(endpoint==='brief/save')return {ok:true,value:coach.briefs.public(await coach.briefs.save(p.sessionId,p.cwd??'',p.brief,p.recordingId))};
       if(endpoint==='files/list')return {ok:true,value:await listMeetingFiles(p.cwd,p.dir??'')};
       if(endpoint==='coach/generate')return {ok:true,value:coach.request(p.sessionId,p.recordingId)};
-      if(endpoint==='coach/cancel')return {ok:true,value:coach.cancel(p.sessionId,p.recordingId)};
+      if(endpoint==='coach/cancel')return {ok:true,value:coach.cancel(p.sessionId,p.recordingId,p.jobId)};
       if(endpoint==='coach/auto')return {ok:true,value:coach.briefs.setAutomatic(p.sessionId,p.recordingId,p.enabled)};
       if(endpoint==='coach/read')return {ok:true,value:coach.readAdvice(p.sessionId,p.recordingId,p.adviceId)};
       if(endpoint==='select'){service.store.select(p.sessionId,p.recordingId);return {ok:true,value:{selected:true}};}
       if(endpoint==='read')return {ok:true,value:await service.read(p.sessionId,p)};
       throw new Error('未知的会议操作');
-    }catch(error){return {ok:false,error:{code:'agentmesh/voice',message:error instanceof Error?error.message:String(error),details:{}}};}
+    }catch(error){return {ok:false,error:{code:'agentmesh/voice',message:redactCredentials(error instanceof Error?error.message:String(error)),details:{}}};}
   };
 }
