@@ -10,7 +10,7 @@ import {diag} from './host-diag.js';
 export const MEETING_RELOAD_GRACE_MS=5000;
 type Binding={ctx:Context;generate:GenerateAdvice;feed:MeetingContextFeed};
 type Options={createStream?:ConstructorParameters<typeof MeetingService>[1];releaseDelayMs?:number};
-type Runtime={service:MeetingService;coach:MeetingCoach;owners:Map<symbol,Binding>;current?:Binding;timer?:ReturnType<typeof setTimeout>;releaseDelayMs:number;closing?:Promise<void>};
+type Runtime={structuredAdvice?:true;service:MeetingService;coach:MeetingCoach;owners:Map<symbol,Binding>;current?:Binding;timer?:ReturnType<typeof setTimeout>;releaseDelayMs:number;closing?:Promise<void>};
 // V2 must not reuse a pre-cancellation-fix coach left alive by an earlier package.
 const registry=globalThis as unknown as {__dshMeetingRuntimesV2?:Map<string,Runtime>};
 const runtimes=registry.__dshMeetingRuntimesV2??(registry.__dshMeetingRuntimesV2=new Map());
@@ -39,12 +39,17 @@ export function acquireMeetingRuntime(root:string,ctx:Context,generate:GenerateA
       tick:meta=>{if(created.current)safe(meta,()=>coach.tick(meta));sync(meta);},
       stopped:meta=>sync(meta),
     });
-    created={service,coach,owners,releaseDelayMs:options.releaseDelayMs??MEETING_RELOAD_GRACE_MS};
+    created={structuredAdvice:true,service,coach,owners,releaseDelayMs:options.releaseDelayMs??MEETING_RELOAD_GRACE_MS};
     runtime=created;runtimes.set(key,runtime);
   }
   const active=runtime;
   if(active.timer!==undefined){clearTimeout(active.timer);active.timer=undefined;}
-  const id=Symbol('meeting owner'),binding:Binding={ctx,generate,feed:new MeetingContextFeed(active.service.store,ctx)};
+  // A pre-0.1.7 coach can survive HMR alongside its ASR stream. Its parser only
+  // accepts text; adapt the new result until a full restart loads the new coach.
+  const compatible:GenerateAdvice=active.structuredAdvice?generate:async(...args)=>{
+    const response=await generate(...args);return typeof response==='string'?response:response.text;
+  };
+  const id=Symbol('meeting owner'),binding:Binding={ctx,generate:compatible,feed:new MeetingContextFeed(active.service.store,ctx)};
   if(active.current)active.coach.suspend();
   active.owners.set(id,binding);active.current=binding;active.coach.resume();
   if(reused)diag.info('voice.lifecycle','会议运行时已接续',{recordingId:active.service.active?.meta.id??null,owners:active.owners.size});

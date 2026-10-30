@@ -66,19 +66,37 @@ dsh plugin --profile desktop remove dsh-plugin-meeting-assistant
 
 ## 使用
 
+以下截图来自插件真实组件，使用演示数据；转写和 AI 内容仅作操作示例。
+
 ### 1. 配置转写服务
 
 打开「设置 → 会议语音」，填写百炼 API Key，以及对应服务的流式 WebSocket 地址和模型名。地址与模型收在「服务地址与模型」中，也可以导入已有的 `.env` 或 JSON 配置。
 
 插件使用 DashScope `run-task` 流式识别协议，请使用支持该协议的服务参数。转写服务按音频时长计费。
 
-AI 建议和目标润色使用 DSH 的模型服务，配置方式见下方[项目资料与 AI](#项目资料与-ai)。
+AI 建议和目标润色使用当前对话选择的模型，配置方式见下方[项目资料与 AI](#项目资料与-ai)。
+
+<details>
+<summary>查看语音设置截图</summary>
+
+<img src="https://raw.githubusercontent.com/vianvio/dsh-plugin-meeting-assistant/main/assets/readme/02-settings.png" width="380" alt="语音设置：百炼 API Key、服务地址与模型、导入配置和保存设置">
+
+在这里保存转写服务凭据；也可以从会议面板右上角菜单进入「语音设置」。
+
+</details>
 
 ### 2. 准备会议
 
 点击输入框旁的「会议助手」。会邀和会议目标直接展示，均可留空；角色与立场放在「更多背景」中。
 
+<p><img src="https://raw.githubusercontent.com/vianvio/dsh-plugin-meeting-assistant/main/assets/readme/01-entry.png" width="135" alt="聊天输入框旁的会议助手入口"></p>
+
 当前会话所在项目自动作为资料范围，无需选择文件。填写目标后，可以点击「AI 润色」获取 2–3 个候选，选择并点击「采用」才替换原文。打开面板、打字和开始录音都不会自动润色。
+
+| 填写会邀与目标 | 按需选择润色方案 |
+| --- | --- |
+| <img src="https://raw.githubusercontent.com/vianvio/dsh-plugin-meeting-assistant/main/assets/readme/03-prepare.png" width="380" alt="会前准备：填写会邀和目标，其他背景折叠"> | <img src="https://raw.githubusercontent.com/vianvio/dsh-plugin-meeting-assistant/main/assets/readme/04-goal-polish.png" width="380" alt="点击 AI 润色，选中一个候选后点击采用"> |
+| 填写讨论主题和希望得到的结论，然后点击「开始录音」。 | 点击「AI 润色」→ 选择候选 → 点击「采用」。 |
 
 ### 3. 开始录音
 
@@ -89,6 +107,20 @@ AI 建议和目标润色使用 DSH 的模型服务，配置方式见下方[项�
 - **追问**：结合讨论和项目资料，查看可提出的问题及依据。
 - **回应**：展开可能被问到的问题，查看简短或展开的回答参考。
 - **转写**：查看逐句原文，按需加载更早的内容。
+
+| 追问：挑选值得继续讨论的问题 | 转写：核对会议原话 |
+| --- | --- |
+| <img src="https://raw.githubusercontent.com/vianvio/dsh-plugin-meeting-assistant/main/assets/readme/05-questions.png" width="380" alt="录音中的追问视图，包含三个问题、提问目的和折叠来源"> | <img src="https://raw.githubusercontent.com/vianvio/dsh-plugin-meeting-assistant/main/assets/readme/07-transcript.png" width="380" alt="录音中的转写视图，逐句显示时间和会议原文"> |
+| 右上角刷新按钮手动生成建议，「来源」可展开查看依据。 | 点击「转写」即可查看逐句记录，顶部仍可结束录音。 |
+
+<details>
+<summary>查看「回应」：展开问题，参考两种回答</summary>
+
+<img src="https://raw.githubusercontent.com/vianvio/dsh-plugin-meeting-assistant/main/assets/readme/06-replies.png" width="380" alt="回应视图：展开问题后显示精简版与高情商版回答">
+
+点击「回应」，再展开一个问题；可复制「精简版」或「高情商版」，按实际情况调整后使用。
+
+</details>
 
 新建议到达时，点击「有新建议，点击查看」才切换版本，正在阅读的卡片会保留。自动分析可在右上角菜单调整，也可以手动更新或取消分析。取消只结束本次分析，录音继续。
 
@@ -104,13 +136,17 @@ AI 建议和目标润色使用 DSH 的模型服务，配置方式见下方[项�
 
 这表示整个项目可作为检索范围，不能等同于模型已经读完每个文件。每次生成会重新读取当前相关内容。旧会议中的文件快照仍可读取。
 
-| 功能 | 模型路径 |
-| --- | --- |
-| 会中建议 | 当前主 Agent 在线且支持子 Agent 时，继承当前会话模型生成 |
-| 会中建议的直调回落 | DSH 的 `deepseek-official / deepseek-flash` |
-| 目标润色 | 用户点击后调用 DSH 的 `deepseek-official / deepseek-flash` |
+会中建议和目标润色都使用**对应对话当前选择的模型**，包括服务商、模型和思考强度。使用前，在 DSH 对话中选好并配置可用模型即可。
 
-需要在 DSH 配置相应的 DeepSeek 模型服务。建议只展示在面板中，由用户选择是否采用，不会自动代用户发言。
+| 功能 | 使用的对话模型 |
+| --- | --- |
+| 会中建议 | 录音所属对话当前选择的模型；支持时通过子 Agent 继承对话上下文 |
+| 会中建议的直调回落 | 仍使用该对话选择的模型 |
+| 目标润色 | 点击「AI 润色」时使用该对话选择的模型 |
+
+切换模型后，下一次分析或润色使用新选择；已经开始的请求继续使用发起时的模型。无法读取会话模型时会提示重新选择，不会静默切换到其他服务商。语音转写使用单独配置的百炼服务，不随对话模型变化。
+
+建议只展示在面板中，由用户选择是否采用，不会自动代用户发言。
 
 录音运行时支持短暂宿主重载后的接续。音频和停止请求遇到短暂路由不可用时会有限重试；取消分析会立即释放任务状态，迟到结果不会覆盖新的分析。
 

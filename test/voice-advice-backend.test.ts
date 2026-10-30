@@ -21,7 +21,7 @@ function stubCtx(options:{agent?:unknown;startActivation?:(spec:Started)=>Promis
   // Cordis resolves `ctx.<name>` only for a declared dependency and THROWS
   // otherwise, so the services are reached through `ctx.get` and the stub models
   // exactly that — a plain property here would hide the bug this suite missed.
-  const services:Record<string,unknown>={};
+  const services:Record<string,unknown>={sessionController:{projections:async()=>({kind:'sequenced',values:{modelSelection:{next:{provider:'selected-provider',model:'selected-model',reasoningEffort:'high'},lastUsed:null}}})}};
   if(options.agent!==undefined)services.agents={get:(id:string)=>{lookedUp.push(id);return options.agent;}};
   if(options.startActivation)services.subagents={startActivation:async(spec:Started)=>{started.push(spec);return options.startActivation!(spec);}};
   const ctx={
@@ -42,7 +42,8 @@ test('a live session agent gets a forked one-shot child carrying the task, the s
   const parent={session:{id:'session-a'}};
   const {ctx,started,lookedUp,run,stats}=stubCtx({agent:parent,startActivation:async()=>run({stopReason:'completed',structured:payload})});
   const text=await meetingAdviceModel(ctx)(request,AbortSignal.timeout(5000),'session-a');
-  assert.equal(text,JSON.stringify(payload));
+  assert.equal(text.text,JSON.stringify(payload));
+  assert.equal(text.model,'selected-model');assert.equal(text.provider,'selected-provider');
   assert.deepEqual(lookedUp,['session-a'],'the parent is looked up by the recording session');
   assert.equal(started.length,1);assert.equal(started[0]!.provider,'fork');
   assert.equal(started[0]!.label,'会议发言建议');
@@ -50,7 +51,7 @@ test('a live session agent gets a forked one-shot child carrying the task, the s
   assert.ok(started[0]!.signal instanceof AbortSignal,'the caller owns cancellation');
   assert.equal(started[0]!.request.parent,parent);
   assert.equal(started[0]!.request.outputSchema,ADVICE_SCHEMA);
-  assert.equal('agentOptions' in started[0]!.request,false,'pinning a route would forfeit KV-cache reuse of the inherited turns');
+  assert.deepEqual(started[0]!.request.agentOptions,{provider:'selected-provider',model:'selected-model',reasoningEffort:'high'},'a pending conversation selection must override the parent creation options');
   assert.equal('toolFilter' in started[0]!.request,false,
     'DSH 0.2.1 的子 agent 请求里没有 toolFilter（它挪到 provider/预设那一侧了）——再写进来就是死字段');
   const task=started[0]!.request.prompt[0].text as string;
@@ -81,7 +82,7 @@ test('without a live agent — or without the services at all — the round fall
   for(const [label,build] of [['no live agent',()=>stubCtx({agent:undefined,stream:okStream})],['no subagent service',()=>stubCtx({agent:{session:{id:'session-a'}},stream:okStream})]] as const){
     const {ctx,stats}=build();
     const text=await meetingAdviceModel(ctx)(request,AbortSignal.timeout(5000),'session-a');
-    assert.equal(text,'{"summary":"直调"}',label);
+    assert.equal(text.text,'{"summary":"直调"}',label);
     assert.deepEqual(stats(),{disposed:0,streamed:1},label);
   }
 });
@@ -91,7 +92,7 @@ test('MESH_VOICE_ADVICE=direct pins the original path even when the session agen
   try{
     const {ctx,started,stats}=stubCtx({agent:{session:{id:'session-a'}},startActivation:async()=>{throw new Error('the forked path must not run');},stream:okStream});
     const text=await meetingAdviceModel(ctx)(request,AbortSignal.timeout(5000),'session-a');
-    assert.equal(text,'{"summary":"直调"}');
+    assert.equal(text.text,'{"summary":"直调"}');
     assert.equal(started.length,0);
     assert.deepEqual(stats(),{disposed:0,streamed:1});
   }finally{delete process.env.MESH_VOICE_ADVICE;}
@@ -100,6 +101,7 @@ test('MESH_VOICE_ADVICE=direct pins the original path even when the session agen
 test('an empty inject still reaches the optional services — ctx.<name> would throw, ctx.get does not',async()=>{
   const started:Record<string,any>[]=[];let captured:string|undefined;let failure:unknown;
   const C=Context as any,S=Service as any;
+  class FakeModels extends S{constructor(ctx:any){super(ctx,'sessionController',{});}async projections(){return {kind:'sequenced',values:{modelSelection:{next:{provider:'selected-provider',model:'selected-model'},lastUsed:null}}};}}
   class FakeAgents extends S{constructor(ctx:any){super(ctx,'agents',{});}get(){return parent;}}
   class FakeSubagents extends S{constructor(ctx:any){super(ctx,'subagents',{});}async startActivation(spec:Record<string,any>){started.push(spec);return run({stopReason:'completed',structured:payload});}}
   let settle:()=>void=()=>{};const finished=new Promise<void>(resolve=>{settle=resolve;});
@@ -110,13 +112,13 @@ test('an empty inject still reaches the optional services — ctx.<name> would t
         // The trap this guards against: cordis resolves a context property only
         // for a declared dependency, and neither service is declared on purpose.
         assert.throws(()=>{void ctx.agents;},/inject/);
-        captured=await meetingAdviceModel(ctx)(request,AbortSignal.timeout(5000),'session-a');
+        captured=(await meetingAdviceModel(ctx)(request,AbortSignal.timeout(5000),'session-a')).text;
       }catch(error){failure=error;}finally{settle();}
     })();
   };
   use.inject=[];
   const root=new C();
-  root.plugin(FakeAgents);root.plugin(FakeSubagents);root.plugin(use);
+  root.plugin(FakeModels);root.plugin(FakeAgents);root.plugin(FakeSubagents);root.plugin(use);
   await finished;
   assert.equal(failure,undefined,failure instanceof Error?failure.message:String(failure));
   assert.equal(captured,JSON.stringify(payload));
@@ -232,10 +234,10 @@ test('an activation arriving after cancelled start is disposed exactly once and 
 });
 
 test('a cancelled start observes its late rejection',async()=>{
-  const controller=new AbortController(),reason=new Error('cancel start before rejection'),starting=deferred<any>();
-  const {ctx}=stubCtx({agent:parent,startActivation:()=>starting.promise});
+  const controller=new AbortController(),reason=new Error('cancel start before rejection'),starting=deferred<any>(),entered=deferred();
+  const {ctx}=stubCtx({agent:parent,startActivation:()=>{entered.resolve();return starting.promise;}});
   const work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
-  controller.abort(reason);await cancelled(work,reason);
+  await promptly(entered.promise);controller.abort(reason);await cancelled(work,reason);
   starting.reject(new Error('late start rejection'));await turn();
   assert.equal(getEventListeners(controller.signal,'abort').length,0);
 });
@@ -270,7 +272,7 @@ test('normal success and provider rejection dispose once even when cleanup throw
       dispose:()=>{disposed++;if(cleanupFailure==='throw')throw new Error('sync dispose failure');return Promise.reject(new Error('async dispose failure'));},
     })});
     const controller=new AbortController(),work=meetingAdviceModel(ctx)(request,controller.signal,'session-a');
-    if(outcome==='success')assert.equal(await work,JSON.stringify(payload));else await assert.rejects(work,rejection=>rejection===error);
+    if(outcome==='success')assert.equal((await work).text,JSON.stringify(payload));else await assert.rejects(work,rejection=>rejection===error);
     assert.equal(disposed,1);assert.equal(getEventListeners(controller.signal,'abort').length,0);await turn();
   });
 });

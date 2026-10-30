@@ -94,3 +94,25 @@ test('a freshly imported plugin module reconnects to the same host recording run
   assert.equal(f.streams.length,1);assert.equal(f.streams[0]!.stops,0);
   await next.service.stop(token);
 });
+
+
+test('new model results preserve metadata across a normal runtime handoff',async t=>{
+  const f=fixture(t),first=f.acquire();await f.prepare(first);const {recording}=first.service.start('session-a');first.release();
+  const next=f.acquire(async()=>({text:response('所选模型'),provider:'selected-provider',model:'selected-model'}));
+  next.coach.request('session-a',recording.id);await next.coach.settled('session-a',recording.id);
+  const advice=next.coach.readAdvice('session-a',recording.id,next.coach.state(recording).latestId!);
+  assert.equal(advice.provider,'selected-provider');assert.equal(advice.model,'selected-model');
+  assert.equal(next.service,first.service);assert.equal(f.streams[0]!.stops,0);
+});
+
+test('a pre-metadata coach can receive new model results without interrupting its ASR stream',async t=>{
+  const f=fixture(t),first=f.acquire();await f.prepare(first);const {recording}=first.service.start('session-a');
+  const registry=(globalThis as any).__dshMeetingRuntimesV2 as Map<string,any>;
+  const active=[...registry.values()].find(value=>value.service===first.service);assert.ok(active);
+  delete active.structuredAdvice;first.release();
+  const next=f.acquire(async()=>({text:response('兼容接续'),provider:'selected-provider',model:'selected-model'}));
+  next.coach.request('session-a',recording.id);await next.coach.settled('session-a',recording.id);
+  const advice=next.coach.readAdvice('session-a',recording.id,next.coach.state(recording).latestId!);
+  assert.equal(advice.content.summary,'兼容接续');assert.equal(advice.model,'unknown');
+  assert.equal(next.service,first.service);assert.equal(next.service.active?.meta.id,recording.id);assert.equal(f.streams[0]!.stops,0);
+});

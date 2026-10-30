@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtempSync,mkdirSync,writeFileSync,rmSync,realpathSync,statSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync,realpathSync,statSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {MeetingService} from '../src/voice/service.js';
@@ -9,7 +9,7 @@ import {MeetingCoach,automaticReason,countMeetingCharacters} from '../src/voice/
 import {BriefStore,listMeetingFiles} from '../src/voice/brief.js';
 import {parseAdvice} from '../src/voice/coach-prompt.js';
 import {saveConfig} from '../src/voice/config.js';
-import type {AdviceContent,BriefDraft,CoachState} from '../src/voice/coach-types.js';
+import type {AdviceContent,BriefDraft,CoachState,GeneratedAdvice} from '../src/voice/coach-types.js';
 import type {StreamHooks} from '../src/vendor/voice-kernel/index.mjs';
 
 const draft:BriefDraft={invitation:'项目评审，讨论周五发布。',role:'我是项目经理，只能协调，不能承诺额外预算。',initialViews:'先做小范围验证，再扩大范围。',filePaths:[],autoEnabled:true};
@@ -20,8 +20,8 @@ const flush=()=>new Promise<void>(resolve=>setImmediate(resolve));
 function fixture(respectAbort=true,timeoutMs=90_000){
   const root=mkdtempSync(join(tmpdir(),'mesh-coach-')),workspace=join(root,'workspace');mkdirSync(workspace);
   const store=new MeetingStore(root),briefs=new BriefStore(store);let clock=1_000_000;
-  const calls:{input:{system:string;prompt:string};resolve:(text:string)=>void;reject:(reason:Error)=>void}[]=[];
-  const coach=new MeetingCoach(store,(input,signal)=>new Promise<string>((resolve,reject)=>{calls.push({input,resolve,reject});if(respectAbort)signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true});}),()=>clock,timeoutMs);
+  const calls:{input:{system:string;prompt:string};sessionId:string;resolve:(response:string|GeneratedAdvice)=>void;reject:(reason:Error)=>void}[]=[];
+  const coach=new MeetingCoach(store,(input,signal,sessionId)=>new Promise<string|GeneratedAdvice>((resolve,reject)=>{calls.push({input,sessionId,resolve,reject});if(respectAbort)signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true});}),()=>clock,timeoutMs);
   let hooks:StreamHooks;
   saveConfig(root,{apiKey:'fixture',wsBase:'wss://example.invalid/asr',model:'fixture'});
   const service=new MeetingService(root,(_config,callbacks)=>{hooks=callbacks;return {state:'connecting',startedAt:Date.now(),audioZeroWall:null,refeedMs:0,queuedBytes:0,async start(){this.state='ready';},sendAudio(){},async stop(){this.state='finished';},forceDrop(){this.state='failed';}};},{started:meta=>{meta.startedAt=clock;store.save(meta);coach.started(meta);},transcribed:(meta,entry)=>coach.transcribed(meta,entry),tick:meta=>coach.tick(meta)});
@@ -73,7 +73,39 @@ test('automatic and manual share one job, snapshot their input, and preserve con
     f.advance(300_000);f.coach.tick(recording);assert.equal(f.calls.length,2,'silence never generates another advice');
     assert.equal(f.service.active?.meta.state,'recording');
     const advice=f.coach.readAdvice('a',recording.id,f.coach.state(recording).latestId!);assert.equal(advice.content.askedOfMe[0]!.conciseReply,content.askedOfMe[0]!.conciseReply);
+    assert.equal(advice.model,'unknown');assert.equal('provider' in advice,false,'legacy injected text must not claim a provider');
     assert.throws(()=>f.coach.readAdvice('b',recording.id,advice.id));
+  }finally{await f.cleanup();}
+});
+
+test('concurrent sessions preserve their own generated advice text, model and provider when results arrive out of order',async()=>{
+  const f=fixture();try{
+    const sessions=['a','b'] as const;
+    const records=await Promise.all(sessions.map(async sessionId=>{
+      await f.briefs.save(sessionId,'',{...draft,autoEnabled:false});
+      const meta=f.store.create(sessionId);f.coach.started(meta);
+      f.store.append(meta,{text:`会话 ${sessionId} 的会议内容`,wallTs:1_000_000,beginMs:0,endMs:1000});
+      return meta;
+    }));
+    const requests=records.map(meta=>f.coach.request(meta.sessionId,meta.id));await f.waitCalls(2);
+    assert.deepEqual(f.calls.map(call=>call.sessionId).sort(),sessions);
+    const generated:Record<string,GeneratedAdvice>={
+      a:{text:JSON.stringify({...content,summary:'会话 a 的建议'}),model:'conversation-a-model',provider:'conversation-a-provider'},
+      b:{text:JSON.stringify({...content,summary:'会话 b 的建议'}),model:'conversation-b-model',provider:'conversation-b-provider'},
+    };
+    for(const call of f.calls)assert.equal(JSON.parse(call.input.prompt).transcript[0].text,`会话 ${call.sessionId} 的会议内容`);
+    f.calls.find(call=>call.sessionId==='b')!.resolve(generated.b!);await f.coach.settled('b',records[1]!.id);
+    assert.equal(f.coach.state(records[0]!).running?.id,requests[0]!.jobId,'another session finishing must not retire this job');
+    f.calls.find(call=>call.sessionId==='a')!.resolve(generated.a!);await f.coach.settled('a',records[0]!.id);
+    for(const [i,meta] of records.entries()){
+      const state=f.coach.state(meta),response=generated[meta.sessionId]!;
+      assert.equal(state.latestId,requests[i]!.jobId);assert.equal(state.running,null);assert.equal(state.throughLine,1);assert.equal(state.error,null);
+      const advice=f.coach.readAdvice(meta.sessionId,meta.id,state.latestId!);
+      assert.deepEqual(advice.content,JSON.parse(response.text));assert.equal(advice.model,response.model);assert.equal(advice.provider,response.provider);
+      assert.equal(advice.id,requests[i]!.jobId);assert.equal(advice.throughLine,1);
+      assert.equal('provider' in state.history[0]!,false);assert.equal('model' in state.history[0]!,false);
+      const other=records[1-i]!;assert.throws(()=>f.coach.readAdvice(other.sessionId,meta.id,advice.id));
+    }
   }finally{await f.cleanup();}
 });
 
@@ -112,15 +144,18 @@ test('cancel immediately clears running state even when the provider ignores abo
   }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
 });
 
-test('a cancelled late result cannot overwrite a newer successful analysis',async()=>{
+test('a cancelled late object result cannot overwrite newer advice content or model metadata',async()=>{
   const f=fixture(false);try{
     await f.briefs.save('a',f.workspace,{...draft,autoEnabled:false});const {recording}=f.service.start('a');await flush();f.sentence('会议内容');
     const first=f.coach.request('a',recording.id);await f.waitCalls(1);f.coach.cancel('a',recording.id);
     const next=f.coach.request('a',recording.id);assert.equal(next.reused,false);await f.waitCalls(2);
-    f.calls[1]!.resolve(JSON.stringify({...content,summary:'新的分析结果'}));await f.coach.settled('a',recording.id);
-    f.calls[0]!.resolve(JSON.stringify({...content,summary:'过期分析结果'}));await flush();await flush();
-    const state=f.coach.state(recording);assert.equal(state.latestId,next.jobId);assert.equal(state.history.length,1);
-    assert.equal(f.coach.readAdvice('a',recording.id,state.latestId!).content.summary,'新的分析结果');assert.equal(state.error,null);
+    f.calls[1]!.resolve({text:JSON.stringify({...content,summary:'新的分析结果'}),model:'selected-model',provider:'selected-provider'});await f.coach.settled('a',recording.id);
+    const saved=f.coach.state(recording);
+    f.calls[0]!.resolve({text:JSON.stringify({...content,summary:'过期分析结果'}),model:'stale-model',provider:'stale-provider'});await flush();await flush();
+    const state=f.coach.state(recording);assert.deepEqual(state,saved);assert.equal(state.latestId,next.jobId);assert.equal(state.history.length,1);
+    const advice=f.coach.readAdvice('a',recording.id,state.latestId!);
+    assert.equal(advice.content.summary,'新的分析结果');assert.equal(advice.model,'selected-model');assert.equal(advice.provider,'selected-provider');assert.equal(state.error,null);
+    assert.equal(existsSync(join(f.store.dir('a',recording.id),'advice',first.jobId+'.json')),false,'cancelled response must never be persisted');
   }finally{for(const call of f.calls)call.resolve(JSON.stringify(content));await flush();await f.cleanup();}
 });
 

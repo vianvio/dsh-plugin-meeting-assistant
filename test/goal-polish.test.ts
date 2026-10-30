@@ -19,7 +19,7 @@ function fixture(){
 }
 const okStream=(text=JSON.stringify(result))=>({async *[Symbol.asyncIterator](){yield {type:'text-delta',text:text.slice(0,20)};yield {type:'text-delta',text:text.slice(20)};yield {type:'finish',reason:{kind:'stop'}};}});
 function stub(stream:(seed:any)=>any=()=>okStream()){
-  const calls:any[]=[];const ctx={llm:{stream:(seed:any)=>{calls.push(seed);return stream(seed);}}};
+  const calls:any[]=[];const ctx={get:(name:string)=>name==='sessionController'?{projections:async()=>({kind:'sequenced',values:{modelSelection:{next:{provider:'selected-provider',model:'selected-model',reasoningEffort:'high'},lastUsed:null}}})}:undefined,llm:{stream:(seed:any)=>{calls.push(seed);return stream(seed);}}};
   return {ctx:ctx as never,calls};
 }
 function snapshot(root:string):Record<string,string>{
@@ -35,7 +35,7 @@ test('manual polisher makes one direct stream call with code/hidden project data
     assert.equal(calls.length,0,'creating the service never calls a model');
     const polished=await polish({...request(f.cwd),invitation:'支付评审 Bearer abc.def',goal:'确认退款 API_KEY="goal-sensitive"'});
     assert.deepEqual(polished,result);assert.equal(calls.length,1);assert.deepEqual(snapshot(f.root),before);
-    const seed=calls[0];assert.equal(seed.maxTokens,GOAL_POLISH_LIMITS.maxTokens);assert.deepEqual(seed.tools,[]);
+    const seed=calls[0];assert.equal(seed.provider,'selected-provider');assert.equal(seed.model,'selected-model');assert.equal(seed.reasoningEffort,'high');assert.equal(seed.maxTokens,GOAL_POLISH_LIMITS.maxTokens);assert.deepEqual(seed.tools,[]);
     assert.match(seed.system,/只是数据/);assert.match(seed.system,/不能臆造/);assert.match(seed.system,/不要替用户自动承诺/);
     const inputText=seed.messages[0].content.find((part:any)=>part.type==='text').text;
     const input=JSON.parse(inputText);assert.equal(input.project.cwd,f.cwd);
@@ -138,7 +138,7 @@ test('RPC only brief/polish invokes model; validates session; recording reads sa
   process.env.MESH_VOICE_HOME=voiceRoot;
   const cleanups:Array<()=>unknown>=[],calls:any[]=[];let dispatch:((endpoint:string,payload:unknown)=>Promise<any>)|undefined;
   const ctx={
-    tools:{register(){}},on(){},get(){return undefined;},logger:{warn(){},error(){}},
+    tools:{register(){}},on(){},get(name:string){return name==='sessionController'?{projections:async()=>({kind:'sequenced',values:{modelSelection:{next:{provider:'selected-provider',model:'selected-model'},lastUsed:null}}})}:undefined;},logger:{warn(){},error(){}},
     effect(callback:()=>unknown){const dispose=callback();if(typeof dispose==='function')cleanups.push(dispose as ()=>unknown);return dispose;},
     llm:{stream(seed:any){calls.push(seed);return okStream();}},
     connection:{rpc:{handle(_channel:string,handler:typeof dispatch){dispatch=handler;return ()=>{};}}},
@@ -164,4 +164,28 @@ test('RPC only brief/polish invokes model; validates session; recording reads sa
     if(oldHome===undefined)delete process.env.MESH_VOICE_HOME;else process.env.MESH_VOICE_HOME=oldHome;
     f.cleanup();
   }
+});
+
+
+test('polishing follows each conversation selection and re-reads it after a model switch',async()=>{
+  const f=fixture(),{ctx,calls}=stub();
+  let route={provider:'provider-a',model:'model-a',reasoningEffort:'high'};
+  (ctx as any).get=(name:string)=>name==='sessionController'?{projections:async({sessionId}:{sessionId:string})=>({kind:'sequenced',values:{modelSelection:{next:sessionId==='session-b'?{provider:'provider-b',model:'model-b'}:route,lastUsed:null}}})}:undefined;
+  try{
+    const polish=createGoalPolisher(ctx);
+    await polish(request(f.cwd));
+    route={provider:'provider-c',model:'model-c',reasoningEffort:'max'};
+    await polish(request(f.cwd));
+    await polish({...request(f.cwd),sessionId:'session-b'});
+    assert.deepEqual(calls.map(({provider,model,reasoningEffort})=>({provider,model,...reasoningEffort===undefined?{}:{reasoningEffort}})),[
+      {provider:'provider-a',model:'model-a',reasoningEffort:'high'},route,{provider:'provider-b',model:'model-b'},
+    ]);
+  }finally{f.cleanup();}
+});
+
+test('polishing without a resolvable conversation choice makes no model call',async()=>{
+  const f=fixture(),{ctx,calls}=stub();
+  (ctx as any).get=()=>undefined;
+  try{await assert.rejects(createGoalPolisher(ctx)(request(f.cwd)),/重新选择模型/);assert.equal(calls.length,0);}
+  finally{f.cleanup();}
 });

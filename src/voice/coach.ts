@@ -79,10 +79,11 @@ export class MeetingCoach {
         const input=buildCoachInput(brief,window.entries,previous,window.omittedLines,project);
         const response=await abortable(this.generate(input,signal,meta.sessionId),signal);
         signal.throwIfAborted();if(!owns())return;
-        const content=parseAdvice(response,input.evidence);
-        const advice:Advice={id,reason,createdAt:this.now(),fromLine:window.entries[0]?.line??0,throughLine:meta.segments,briefRevision:brief.revision,content,evidence:input.evidence,omittedLines:window.omittedLines,model:'deepseek-flash'};
+        const generated=typeof response==='string'?{text:response,model:'unknown',provider:undefined}:response;
+        const content=parseAdvice(generated.text,input.evidence);
+        const advice:Advice={id,reason,createdAt:this.now(),fromLine:window.entries[0]?.line??0,throughLine:meta.segments,briefRevision:brief.revision,content,evidence:input.evidence,omittedLines:window.omittedLines,model:generated.model,provider:generated.provider};
         const dir=join(this.store.dir(sessionId,recordingId),'advice');mkdirSync(dir,{recursive:true,mode:0o700});writePrivateJson(join(dir,id+'.json'),advice);
-        const {content:_content,evidence:_evidence,model:_model,omittedLines:_omitted,...index}=advice;
+        const {content:_content,evidence:_evidence,model:_model,provider:_provider,omittedLines:_omitted,...index}=advice;
         const current=this.state(meta);
         Object.assign(current,{throughLine:meta.segments,coveredChars:window.totalChars,lastSuccessAt:this.now(),latestId:id,running:null,error:null,failedThroughLine:-1,history:[index,...current.history].slice(0,30)});this.writeState(meta,current);
       }catch(error){

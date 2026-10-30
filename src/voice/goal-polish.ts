@@ -1,5 +1,6 @@
 import type {Context} from '@deepseek-ai/cordis';
-import {createUserMessage,ReasoningEffortId} from '@deepseek-ai/dsh-llm';
+import {createUserMessage} from '@deepseek-ai/dsh-llm';
+import {conversationModel} from './conversation-model.js';
 import {sourceFor} from '../shared/host-source.js';
 import {loadProjectContext,redactCredentials,projectJson} from './project-context.js';
 
@@ -57,10 +58,12 @@ export function createGoalPolisher(ctx:Context,limits:{timeoutMs?:number;outputC
     let iterator:AsyncIterator<unknown>|undefined;
     try{
       signal.throwIfAborted();
+      const selection=await conversationModel(ctx,request.sessionId,signal);
+      signal.throwIfAborted();
       const project=await withAbort(loadProjectContext(request.cwd,[request.goal,request.invitation,request.role??'',request.initialViews??''],signal),signal);
       signal.throwIfAborted();
       const prompt=projectJson({goal:request.goal,invitation:request.invitation,role:request.role??'',initialViews:request.initialViews??'',project});
-      const stream=ctx.llm.stream({provider:'deepseek-official',model:'deepseek-flash',reasoningEffort:ReasoningEffortId('off'),maxTokens:GOAL_POLISH_LIMITS.maxTokens,system:SYSTEM,
+      const stream=ctx.llm.stream({...selection,maxTokens:GOAL_POLISH_LIMITS.maxTokens,system:SYSTEM,
         messages:[createUserMessage({content:[{type:'text',text:prompt}],source:sourceFor('dsh-plugin-meeting-assistant')} as never)],tools:[],signal});
       iterator=stream[Symbol.asyncIterator]();
       let text='',finished=false;

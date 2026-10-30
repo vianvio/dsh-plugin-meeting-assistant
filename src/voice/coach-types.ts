@@ -12,11 +12,12 @@ interface AskedQuestion {question:string;why:string;tactfulReply:string;conciseR
 interface AskQuestion {question:string;purpose:string;timing:string;sources:string[]}
 export interface AdviceContent {summary:string;askedOfMe:AskedQuestion[];askOthers:AskQuestion[];uncertainties:string[];carryForward:string}
 export interface AdviceIndex {id:string;createdAt:number;reason:'manual'|'characters'|'time';fromLine:number;throughLine:number;briefRevision:number}
-export interface Advice extends AdviceIndex {content:AdviceContent;evidence:Evidence[];omittedLines:number;model:string}
+export interface Advice extends AdviceIndex {content:AdviceContent;evidence:Evidence[];omittedLines:number;model:string;provider?:string}
 interface CoachJob {id:string;startedAt:number;throughLine:number;briefRevision:number;reason:AdviceIndex['reason']}
 export interface CoachState {
   throughLine:number;coveredChars:number;lastSuccessAt:number;lastAttemptAt:number;
   failedThroughLine:number;latestId:string|null;running:CoachJob|null;error:string|null;history:AdviceIndex[];
 }
 export interface CoachStatus extends CoachState {autoEnabled:boolean;pendingChars:number|null;pendingLines:number;rule:typeof COACH_RULE}
-export type GenerateAdvice=(input:{system:string;prompt:string},signal:AbortSignal,sessionId:string)=>Promise<string>;
+export interface GeneratedAdvice {text:string;model:string;provider:string}
+export type GenerateAdvice=(input:{system:string;prompt:string},signal:AbortSignal,sessionId:string)=>Promise<string|GeneratedAdvice>;
