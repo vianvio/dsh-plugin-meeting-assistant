@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-meeting-assistant",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "license": "MIT",
   "description": "DSH 会议助手：本机麦克风采集与 DashScope 流式转写、会前准备、会中发言建议与会后记录。独立插件，不依赖 Agent Mesh 或任何平台连接。",
@@ -85,13 +85,17 @@
     "@deepseek-ai/dsh-session": ">=0.2.1-rc.2 <0.3.0-0",
     "@deepseek-ai/dsh-subagent": ">=0.2.1-rc.2 <0.3.0-0",
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.3.0-0",
-    "react-dom": ">=18 <20"
+    "react-dom": ">=18 <20",
+    "@deepseek-ai/dsh-plugin-manager": ">=0.2.1-rc.5 <0.3.0-0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent": {
       "optional": true
     },
     "@deepseek-ai/dsh-subagent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-plugin-manager": {
       "optional": true
     }
   },

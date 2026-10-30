@@ -5,10 +5,12 @@ import {dockStore} from '../shared/dock/dock-store.js';
 import {BriefEditor,AdvicePanel,type BriefCache} from './coach-ui.js';
 import type {CoachStatus,PublicBrief} from './coach-types.js';
 import {THEME} from '../shared/theme.js';
+import {PluginUpdates,isNewerPluginVersion} from './update-ui.js';
+import type {PluginUpdateStatus} from './update-types.js';
 
 const PANEL_ID='meeting-assistant-panel';
-type Status={hostVersion?:string;coach:CoachStatus|null;active:{sessionId:string;id:string;state:string}|null;recordings:MeetingMeta[];result:{recording:MeetingMeta;entries:TranscriptEntry[];transcriptPath:string}|null};
-type PanelView='meeting'|'settings'|'background'|'history';
+type Status={hostVersion?:string;updates?:PluginUpdateStatus;coach:CoachStatus|null;active:{sessionId:string;id:string;state:string}|null;recordings:MeetingMeta[];result:{recording:MeetingMeta;entries:TranscriptEntry[];transcriptPath:string}|null};
+type PanelView='meeting'|'settings'|'background'|'history'|'updates';
 type ContentTab='questions'|'replies'|'transcript';
 const button:React.CSSProperties={border:'1px solid #8884',borderRadius:8,background:'transparent',color:'inherit',padding:'7px 11px',cursor:'pointer',fontSize:12,lineHeight:1.5};
 const primary:React.CSSProperties={...button,background:'#2769e7',borderColor:'#2769e7',color:'white'};
@@ -53,6 +55,8 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
   const hasError=!!(error||statusError||local.error||meta?.error);
   const prepared=!meta&&!liveHere&&!other&&!pending&&!stopping;
   const hostOutdated=!!clientVersion&&!!status&&status.hostVersion!==clientVersion;
+  const updates=status?.updates,installing=updates?.phase==='installing';
+  const updateHint=isNewerPluginVersion(updates?.installedVersion,updates?.currentVersion)?'插件更新待重启':isNewerPluginVersion(updates?.latestVersion,updates?.currentVersion)?'有插件更新':null;
   const select=async(recordingId:string)=>{try{await call('select',{sessionId,recordingId});if(currentSession.current!==sessionId)return;setPreparing(false);setView('meeting');setError('');await refresh();}catch(e){setError(e instanceof Error?e.message:String(e));}};
   const openPanel=()=>{closeDetails();if(dockStore.has(PANEL_ID))dockStore.activate(PANEL_ID);wantFocus.current=true;setPanel(true);setView('meeting');if(status?.active?.sessionId===sessionId){setPreparing(false);if(meta?.id!==status.active.id)void select(status.active.id);}};
   const closePanel=()=>{setPanel(false);entry.current?.focus();};
@@ -60,7 +64,7 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
   const back=()=>{resumeStart.current=false;setResumeAfterSettings(false);setView('meeting');};
   const newMeeting=()=>{closeMenu();setPreparing(true);setAdviceHistory(false);setTab('questions');setView('meeting');setError('');};
   const begin=async()=>{
-    if(hostOutdated||startingRef.current||capture.snapshot().busy||capture.snapshot().recording||status?.active)return;
+    if(hostOutdated||installing||startingRef.current||capture.snapshot().busy||capture.snapshot().recording||status?.active)return;
     const intent=++startIntent.current;startingRef.current=true;setStarting(true);setError('');
     const valid=()=>startIntent.current===intent&&currentSession.current===sessionId;
     try{
@@ -99,8 +103,8 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
   };
   const recordedAt=local.startedAt??activeMeta?.startedAt,elapsed=recordedAt?time(Date.now()-recordedAt):'';
   const entryText=local.phase==='permission'?'等待授权':stopping?'正在保存':pending?'正在准备':active?`会议${elapsed?` · ${elapsed}`:''}`:'会议助手';
-  const sectionTitle=view==='settings'?'语音设置':view==='background'?'会议背景':view==='history'?'历史记录':meta&&!liveHere?'会议记录':'会议助手';
-  const editor=<BriefEditor key={`${sessionId}/${preparing?'draft':meta?.id??'draft'}`} sessionId={sessionId} recordingId={preparing?undefined:meta?.id} call={call} getCwd={getCwd} cache={briefCache} onSaved={refresh} onStart={begin} compact showStart={false} showSave={view==='background'} disabled={starting||local.busy||hostOutdated}/>;
+  const sectionTitle=view==='updates'?'插件更新':view==='settings'?'语音设置':view==='background'?'会议背景':view==='history'?'历史记录':meta&&!liveHere?'会议记录':'会议助手';
+  const editor=<BriefEditor key={`${sessionId}/${preparing?'draft':meta?.id??'draft'}`} sessionId={sessionId} recordingId={preparing?undefined:meta?.id} call={call} getCwd={getCwd} cache={briefCache} onSaved={refresh} onStart={begin} compact showStart={false} showSave={view==='background'} disabled={starting||local.busy||hostOutdated||installing}/>;
   const tabs:readonly [ContentTab,string][]=[['questions','追问'],['replies','回应'],['transcript','转写']];
   const body=<section aria-label="会议助手" onKeyDown={event=>{event.stopPropagation();if(event.key==='Escape'){event.preventDefault();if(menu.current?.open){closeMenu();menu.current?.querySelector('summary')?.focus();}else if(view!=='meeting')back();else closePanel();}}} onPaste={event=>event.stopPropagation()} onClick={event=>event.stopPropagation()} onPointerDown={event=>{event.stopPropagation();if(!menu.current?.contains(event.target as Node))closeMenu();}} style={{height:'100%',minHeight:0,boxSizing:'border-box',display:'flex',flexDirection:'column',padding:'18px 20px',fontSize:13}}>
     <header style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,minHeight:32,flexShrink:0,marginBottom:20}}>
@@ -119,6 +123,8 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
             <button style={{...quiet,textAlign:'left'}} onClick={()=>{closeMenu();setView('history');}}>历史记录</button>
             <button style={{...quiet,textAlign:'left'}} disabled={!meta||exporting} onClick={()=>void exportText()}>{exporting?'导出中…':'导出文字'}</button>
             <button style={{...quiet,textAlign:'left'}} onClick={()=>{closeMenu();resumeStart.current=false;setResumeAfterSettings(false);setView('settings');}}>语音设置</button>
+            <div style={{height:1,background:'#8882',margin:'3px 4px'}}/>
+            <button style={{...quiet,textAlign:'left',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}} onClick={()=>{closeMenu();setView('updates');}}>插件更新{updateHint&&<span aria-label={updateHint} style={{width:5,height:5,borderRadius:'50%',background:'#2769e7'}}/>}</button>
           </nav>
         </details>
         <button style={{...quiet,padding:'2px 5px',fontSize:20,lineHeight:1}} aria-label="收起会议助手" title="收起" onClick={closePanel}>×</button>
@@ -131,10 +137,10 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
     {view==='meeting'&&meta&&!liveHere&&active&&!other&&<button style={{...quiet,textAlign:'left',padding:'0 0 14px',color:'#2769e7'}} onClick={()=>void select(status?.active?.id??local.recordingId!)}>回到录音</button>}
     {view==='meeting'&&(liveHere||meta)&&!pending&&!stopping&&<div role="tablist" aria-label="会议内容" style={{display:'flex',alignItems:'center',gap:22,borderBottom:'1px solid #8882',marginBottom:18,flexShrink:0}}>
       {tabs.map(([key,label],index)=><button key={key} id={`meeting-tab-${key}`} role="tab" aria-selected={tab===key} aria-controls={key==='transcript'?'meeting-content-transcript':'meeting-content-advice'} tabIndex={tab===key?0:-1} onKeyDown={event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();event.stopPropagation();const next=event.key==='Home'?0:event.key==='End'?2:(index+(event.key==='ArrowRight'?1:2))%3;setTab(tabs[next]![0]);event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();}} onClick={()=>setTab(key)} style={{...quiet,padding:'8px 0 11px',borderRadius:0,borderBottom:tab===key?'2px solid currentColor':'2px solid transparent',opacity:tab===key?1:.5,fontWeight:tab===key?600:400,fontSize:13}}>{label}</button>)}
-      {tab!=='transcript'&&meta&&status?.coach&&<div style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:3}}>{status.coach.running?<button style={quiet} aria-label="取消分析" aria-busy={cancelling} disabled={analysisBusy} onClick={()=>void analyze('coach/cancel',{jobId:status.coach?.running?.id})}>{cancelling?'正在取消…':'取消分析'}</button>:<button style={{...quiet,display:'flex',padding:'5px 2px 9px'}} aria-label="更新建议" title="更新建议" disabled={analysisBusy||hostOutdated} onClick={()=>void analyze('coach/generate')}><RefreshIcon/></button>}</div>}
+      {tab!=='transcript'&&meta&&status?.coach&&<div style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:3}}>{status.coach.running?<button style={quiet} aria-label="取消分析" aria-busy={cancelling} disabled={analysisBusy} onClick={()=>void analyze('coach/cancel',{jobId:status.coach?.running?.id})}>{cancelling?'正在取消…':'取消分析'}</button>:<button style={{...quiet,display:'flex',padding:'5px 2px 9px'}} aria-label="更新建议" title="更新建议" disabled={analysisBusy||hostOutdated||installing} onClick={()=>void analyze('coach/generate')}><RefreshIcon/></button>}</div>}
     </div>}
     <div style={{overflowY:'auto',flex:1,minHeight:0,paddingRight:2}}>
-      {view==='settings'?<MeetingSettings heading={false} call={call} recording={active} submitLabel={resumeAfterSettings?'保存并开始录音':undefined} onSaved={async()=>{const resume=resumeStart.current;resumeStart.current=false;setResumeAfterSettings(false);setView('meeting');if(resume)await begin();}}/>:view==='background'?editor:view==='history'?<div aria-label="历史会议记录">
+      {view==='updates'?<PluginUpdates call={call} visible={panel&&view==='updates'} currentVersion={clientVersion}/>:view==='settings'?<MeetingSettings heading={false} call={call} recording={active} submitLabel={resumeAfterSettings?'保存并开始录音':undefined} onSaved={async()=>{const resume=resumeStart.current;resumeStart.current=false;setResumeAfterSettings(false);setView('meeting');if(resume)await begin();}}/>:view==='background'?editor:view==='history'?<div aria-label="历史会议记录">
         {status?.recordings.length?status.recordings.map(item=><button key={item.id} style={{...quiet,width:'100%',textAlign:'left',padding:'14px 0',borderRadius:0,borderBottom:'1px solid #8882',display:'flex',justifyContent:'space-between',gap:12}} onClick={()=>void select(item.id)}><span>{new Date(item.startedAt).toLocaleString()}</span><span style={{opacity:.5,fontVariantNumeric:'tabular-nums'}}>{time((item.endedAt??Date.now())-item.startedAt)}</span></button>):<p style={muted}>暂无记录</p>}
       </div>:other?<p role="status" style={{lineHeight:1.8,margin:0}}>另一会话正在{local.phase==='permission'?'等待录音授权':'录音'}。</p>:pending?<div role="status" style={{padding:'30px 0',display:'grid',gap:20,justifyItems:'center'}}><span>{local.phase==='permission'?'等待麦克风授权':local.phase==='connecting'?'正在连接麦克风':'准备录音…'}</span><button style={button} onClick={cancelStart}>取消启动</button></div>:stopping?<p role="status" style={muted}>正在保存录音…</p>:prepared?editor:meta?<>
         {meta.error&&<p role="alert" style={{color:'#c24b43',lineHeight:1.7,marginTop:0}}>{meta.error}</p>}
@@ -145,7 +151,7 @@ export function MeetingToggle({sessionId,call,capture,available,closeDetails,get
         <div id="meeting-content-transcript" role="tabpanel" aria-labelledby="meeting-tab-transcript" hidden={tab!=='transcript'}><Transcript key={meta.id} sessionId={sessionId} recording={meta} entries={status?.result?.entries??[]} call={call}/></div>
       </>:liveHere?<p style={muted}>正在连接转写…</p>:null}
     </div>
-    {view==='meeting'&&prepared&&<footer style={{paddingTop:18,flexShrink:0}}><button style={{...primary,width:'100%',fontSize:14,padding:'10px 14px'}} disabled={!status||active||hostOutdated} onClick={()=>void begin()}>{status?'开始录音':'正在连接…'}</button></footer>}
+    {view==='meeting'&&prepared&&<footer style={{paddingTop:18,flexShrink:0}}><button style={{...primary,width:'100%',fontSize:14,padding:'10px 14px'}} disabled={!status||active||hostOutdated||installing} onClick={()=>void begin()}>{installing?'插件更新中…':status?'开始录音':'正在连接…'}</button></footer>}
   </section>;
   useEffect(()=>{if(panel&&available)dockStore.set({id:PANEL_ID,order:20,title:'会议',render:()=>body,onClose:onDockClose},wantFocus.current);else if(dockStore.getSnapshot().panels.some(item=>item.id===PANEL_ID&&item.onClose===onDockClose))dockStore.close(PANEL_ID);wantFocus.current=false;});
   useEffect(()=>()=>{if(dockStore.getSnapshot().panels.some(item=>item.id===PANEL_ID&&item.onClose===onDockClose))dockStore.close(PANEL_ID);},[onDockClose]);

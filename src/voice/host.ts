@@ -16,6 +16,8 @@ import {acquireMeetingRuntime} from './runtime.js';
 import {meetingAdviceModel,describeAdviceBackend} from './coach-model.js';
 import {listMeetingFiles} from './brief.js';
 import {createGoalPolisher} from './goal-polish.js';
+import {acquirePluginUpdater} from './update-service.js';
+import type {PluginUpdater} from './updater.js';
 import {redactCredentials} from './project-context.js';
 // 日志从**叶子模块**取，不从插件入口取：入口是有副作用的模块（模块级会写日志、挂加载看门狗），
 // 而宿主半的每个文件都 import 它就会构成运行期循环，只 import 宿主半也会执行入口的模块级语句。
@@ -46,7 +48,7 @@ export function voiceLogTool(service:MeetingService){
     },
   });
 }
-export function installVoice(ctx:Context){
+export function installVoice(ctx:Context,options:{updater?:PluginUpdater}={}){
   // Which backend an advice round takes is invisible from the panel, and the
   // answer depends on whether the session's agent happens to be live, so say it
   // once where the logs are already being read for the build marker.
@@ -54,6 +56,10 @@ export function installVoice(ctx:Context){
   const runtime=acquireMeetingRuntime(voiceHome(),ctx,meetingAdviceModel(ctx));
   const {service,coach}=runtime;
   const polishGoal=createGoalPolisher(ctx);
+  const updateLease=options.updater?{updater:options.updater,release:()=>{}}:acquirePluginUpdater(ctx,PLUGIN_VERSION,()=>!!service.active||coach.busy!==false);
+  const updater=updateLease.updater;
+  ctx.effect(()=>updateLease.release,'meeting-assistant: stop update checks on unload');
+  const updating=()=>{if(updater.snapshot().phase==='installing')throw new Error('插件正在更新，请稍后重试。');};
   // Model/default-profile changes release this application, not the in-progress recording.
   ctx.effect(()=>runtime.release,'meeting-assistant: release this plugin application');
   ctx.tools.register(voiceLogTool(service));
@@ -102,6 +108,13 @@ export function installVoice(ctx:Context){
         const text=formatReport({plugin:'dsh-plugin-meeting-assistant',version:PLUGIN_VERSION,diagnosticId:typeof p.diagnosticId==='string'?p.diagnosticId:typeof p.consumerId==='string'?p.consumerId:diagConsumerId(),extra:{录音目录:service.root},entries:diag.list()});
         return {ok:true,value:{text}};
       }
+      if(endpoint==='update/status')return {ok:true,value:updater.snapshot()};
+      if(endpoint==='update/check')return {ok:true,value:await updater.check()};
+      if(endpoint==='update/settings'){
+        if(typeof p.enabled!=='boolean')throw new Error('无效的自动更新设置。');
+        return {ok:true,value:updater.setEnabled(p.enabled)};
+      }
+      if(endpoint==='update/install')return {ok:true,value:await updater.requestInstall()};
       if(endpoint==='config')return {ok:true,value:{...publicConfig(service.root),hostVersion:PLUGIN_VERSION}};
       if(endpoint==='save'){
         if(service.active)throw new Error('请先停止录音，再修改语音识别设置。');
@@ -114,24 +127,27 @@ export function installVoice(ctx:Context){
       // The authenticated UI owns the session identity; recording must not require a model turn.
       if(typeof p.sessionId!=='string'||!/^[A-Za-z0-9_-]{1,200}$/.test(p.sessionId))throw new Error('请先打开一个有效的 DSH 会话。');
       if(endpoint==='start'){
+        updating();
         if(!coach.briefs.read(p.sessionId).revision)throw new Error('请先确认会前准备，再开始会议。');
         return {ok:true,value:service.start(p.sessionId)};
       }
       if(endpoint==='status'){
         const status=await service.status(p.sessionId,p.recordingId);
-        return {ok:true,value:{...status,hostVersion:PLUGIN_VERSION,coach:status.result?coach.status(status.result.recording):null}};
+        return {ok:true,value:{...status,hostVersion:PLUGIN_VERSION,updates:updater.snapshot(),coach:status.result?coach.status(status.result.recording):null}};
       }
       if(endpoint==='brief/polish'){
         // During recording the confirmed brief, rather than a changed UI session, owns cwd.
         const active=service.active?.meta;
         const recordingId=p.recordingId??(active?.sessionId===p.sessionId?active.id:undefined);
         const cwd=recordingId?coach.briefs.read(p.sessionId,recordingId).cwd:p.cwd;
-        return {ok:true,value:await polishGoal({sessionId:p.sessionId,recordingId,cwd,invitation:p.invitation,goal:p.goal,role:p.role,initialViews:p.initialViews})};
+        const release=updater.reserveActivity();
+        try{return {ok:true,value:await polishGoal({sessionId:p.sessionId,recordingId,cwd,invitation:p.invitation,goal:p.goal,role:p.role,initialViews:p.initialViews})};}
+        finally{release();}
       }
       if(endpoint==='brief/get')return {ok:true,value:coach.briefs.public(coach.briefs.read(p.sessionId,p.recordingId))};
       if(endpoint==='brief/save')return {ok:true,value:coach.briefs.public(await coach.briefs.save(p.sessionId,p.cwd??'',p.brief,p.recordingId))};
       if(endpoint==='files/list')return {ok:true,value:await listMeetingFiles(p.cwd,p.dir??'')};
-      if(endpoint==='coach/generate')return {ok:true,value:coach.request(p.sessionId,p.recordingId)};
+      if(endpoint==='coach/generate'){updating();return {ok:true,value:coach.request(p.sessionId,p.recordingId)};}
       if(endpoint==='coach/cancel')return {ok:true,value:coach.cancel(p.sessionId,p.recordingId,p.jobId)};
       if(endpoint==='coach/auto')return {ok:true,value:coach.briefs.setAutomatic(p.sessionId,p.recordingId,p.enabled)};
       if(endpoint==='coach/read')return {ok:true,value:coach.readAdvice(p.sessionId,p.recordingId,p.adviceId)};

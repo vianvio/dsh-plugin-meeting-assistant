@@ -23,6 +23,7 @@ export class MeetingCoach {
   private totals=new Map<string,{line:number;characters:number}>();
   private disposed=false;
   private suspended=false;
+  get busy(){return this.jobs.size>0;}
   constructor(readonly store:MeetingStore,private generate:GenerateAdvice,private now=Date.now,private timeoutMs:number=90_000){this.briefs=new BriefStore(store);}
   private key(meta:MeetingMeta){return `${meta.sessionId}/${meta.id}`;}
   private statePath(meta:MeetingMeta){return join(this.store.dir(meta.sessionId,meta.id),'coach-state.json');}

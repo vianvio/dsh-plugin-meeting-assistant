@@ -121,3 +121,14 @@ node --import tsx scripts/voice-live.ts
 
 会议功能的完整设计说明（转写链路、发言建议的两条后端、上下文注入的两条路径）见
 [docs/VOICE.md](docs/VOICE.md)。
+
+
+## 插件自动更新
+
+入口位于会议助手「⋯ → 插件更新」。宿主通过可选的 `profileContext` 和 `pluginManager` 能力定位当前 profile，使用公开的 `@deepseek-ai/dsh-plugin-manager/operations` 中 `runPluginCommand` 安装本包的精确稳定版，复用 CLI 的写锁和版本兼容性检查。该 API 缺失时不影响会议功能。
+
+更新设置保存在 profile 下的 `.meeting-assistant-updates.json`，只记录开关、最近检查时间和稳定版号。默认每天检查一次；录音、分析或目标润色期间排队，安装阶段拒绝新的录音和 AI 任务。状态由更新页轮询，关闭页面即停止该页轮询；后台检查由宿主调度，不依赖面板打开。
+
+更新器按 profile 在进程内共享。插件热重载会转交状态和平台绑定，卸载仅停止后续调度；正在执行的安装须等待原生安装程序退出，不能提前释放锁或重复安装。不自动重启应用。源码、Git 和未知安装来源禁止覆盖；本地归档更新会切换到官方 npm 稳定通道。
+
+`test/plugin-updater.test.ts` 覆盖调度、排队、取消等待、版本比较、超时及持久化失败；`test/update-driver.test.ts` 验证固定包名、来源保护和原生参数；`test/update-service.test.ts` 验证跨重载和 profile 隔离；`test/update-routes.test.ts` 验证 RPC 与会议任务互斥。浏览器回归覆盖菜单、开关、乱序响应、安装进度及麦克风保护。

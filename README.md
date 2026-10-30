@@ -46,6 +46,14 @@ macOS 上，DeepSeek Harness 安装在 `/Applications` 时，可以直接使用�
 
 ### 升级
 
+打开会议助手右上角「⋯ → 插件更新」，可查看版本、立即检查或关闭自动更新。
+
+自动更新默认开启，每天检查一次 npm 稳定版；录音、分析或目标润色正在进行时先等待，空闲后再安装。更新期间不能开始新录音或分析，安装完成后按面板提示完整重开 DSH。未提供该能力的 DSH 可以使用下方命令手动更新。
+
+npm 和本地 `.tgz` 安装均从官方 npm 稳定通道更新；`link:`、本地源码目录和 Git 安装保留开发来源，不会被自动替换。自动更新开关按 DSH profile 保存。
+
+也可以继续使用命令行：
+
 ```bash
 dsh plugin --profile desktop update dsh-plugin-meeting-assistant --registry=https://registry.npmjs.org/
 ```
