@@ -6,13 +6,15 @@
 
 [安装](#安装) · [使用](#使用) · [项目资料与-ai](#项目资料与-ai) · [数据与边界](#数据与边界) · [开发](#开发)
 
-[![npm](https://img.shields.io/npm/v/dsh-plugin-meeting-assistant?label=npm)](https://www.npmjs.com/package/dsh-plugin-meeting-assistant) · [![license](https://img.shields.io/badge/license-MIT-success)](LICENSE) · ![DSH](https://img.shields.io/badge/DSH-plugin-4B6BFB)
+[![npm](https://img.shields.io/npm/v/dsh-plugin-meeting-assistant?label=npm)](https://www.npmjs.com/package/dsh-plugin-meeting-assistant) · [![license](https://img.shields.io/badge/license-Noncommercial%20%2F%20Commercial-orange)](LICENSE) · ![DSH](https://img.shields.io/badge/DSH-plugin-4B6BFB)
 
 </div>
 
 会议助手直接装进 DeepSeek Harness：聊天输入框旁的一个入口，完成会前准备、麦克风录音、实时转写和会中辅助。录音、文字与会议背景保存在本机，历史记录可以回看和导出。
 
 它可以独立安装。录音与转写由本插件提供，会中建议结合当前项目、你的会议目标和最近讨论生成。
+
+**许可：非商业使用免费；企业内部使用、付费服务、SaaS 集成及其他商业使用，须向 [vianvio](https://github.com/vianvio) 付费并取得书面商业授权。** [查看条款](LICENSE)。
 
 | 会前 | 会中 | 会后 |
 | --- | --- | --- |
@@ -199,4 +201,14 @@ npm run test:ui     # 可选：真实组件 + 模拟音频/RPC 的浏览器回�
 
 ## 许可与来源
 
-[MIT](LICENSE)。会议助手从 Agent Mesh 拆分为独立插件；共享层和语音内核的来源分别记录在 [src/shared/README.md](src/shared/README.md) 与 [src/vendor/voice-kernel/README.md](src/vendor/voice-kernel/README.md)。
+本项目自 **v0.1.9** 起采用[非商业与商业授权许可](LICENSE)：
+
+- 个人非商业使用、学习和非商业研究可免费使用、修改，并依条款分发。
+- 企业内部使用、付费服务、SaaS／托管服务、商业集成及销售分发，须事先向 **vianvio 付费并取得单独书面授权**。
+- 授权价格、部署范围、期限及再分发权限由双方另行约定，请通过 [vianvio 的 GitHub 主页](https://github.com/vianvio) 联系维护者洽谈。
+
+这是带商业使用限制的源码可见许可。公开仓库、npm 下载或自动更新均不代表获得商业授权。
+
+v0.1.8 及更早版本已经依 MIT 授出的有效权利仍然保留，新条款不追溯收回这些授权。第三方组件继续适用各自的许可证，完整声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+会议助手从 Agent Mesh 拆分为独立插件；共享层和语音内核的来源分别记录在 [src/shared/README.md](src/shared/README.md) 与 [src/vendor/voice-kernel/README.md](src/vendor/voice-kernel/README.md)。

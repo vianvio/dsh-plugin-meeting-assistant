@@ -1,8 +1,8 @@
 {
   "name": "dsh-plugin-meeting-assistant",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "type": "module",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "description": "DSH 会议助手：本机麦克风采集与 DashScope 流式转写、会前准备、会中发言建议与会后记录。独立插件，不依赖 Agent Mesh 或任何平台连接。",
   "main": "lib/index.js",
   "exports": {
@@ -15,6 +15,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "THIRD-PARTY-NOTICES.md",
     "docs",
     "assets/readme",
     "!lib/*.map"

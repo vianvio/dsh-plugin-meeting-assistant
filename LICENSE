@@ -1,21 +1,100 @@
-MIT License
+DSH Meeting Assistant Noncommercial and Commercial License
+Version 1.0
 
-Copyright (c) 2026 dsh-plugin-meeting-assistant contributors
+Copyright (c) 2026 vianvio and dsh-plugin-meeting-assistant contributors.
+All rights reserved except as expressly granted below.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Licensor: vianvio
+Contact and commercial licensing: https://github.com/vianvio
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Scope and definitions
+
+"Software" means the portions of dsh-plugin-meeting-assistant, including its
+source code, compiled plugin and documentation, that the Licensor is entitled
+to license under these terms.
+
+"Commercial Use" means use primarily intended for commercial advantage,
+monetary compensation or the business operations of a for-profit
+organization. It includes, without limitation:
+(a) internal deployment or use on behalf of a business;
+(b) using the Software to deliver paid consulting, development, meeting,
+    transcription or other services;
+(c) providing the Software or its functionality through a hosted service,
+    SaaS product, API, managed service or customer-facing application; and
+(d) selling, sublicensing, commercially distributing or bundling the Software
+    or modified versions with a paid product or service.
+Commercial Use remains Commercial Use when the Software is not separately
+priced, when access is bundled with something else, or when it is modified.
+
+"Noncommercial Use" means personal, educational, research or other use that
+does not constitute Commercial Use. Personal use by an individual solely
+outside that individual's work for a business can qualify.
+
+2. Free noncommercial permission
+
+Subject to these terms, permission is granted, free of charge, to use, copy,
+study and modify the Software solely for Noncommercial Use. You may
+redistribute original or modified copies solely for Noncommercial Use,
+provided that you:
+(a) retain this license and all applicable copyright and third-party notices;
+(b) clearly identify material modifications you make; and
+(c) do not grant recipients Commercial Use rights or remove these conditions.
+
+This is a source-available license with a commercial-use restriction, not an
+unrestricted open-source license. Public availability of the repository or
+npm package does not grant unrestricted commercial rights.
+
+3. Paid commercial authorization required
+
+Commercial Use is NOT permitted under the free permission in section 2.
+Before any Commercial Use, you must obtain a separate written commercial
+license directly from vianvio and pay the licensing fees agreed with vianvio.
+
+The written commercial agreement determines the authorized licensee, use,
+products, deployments, term, fees and any redistribution or sublicensing
+rights. No fixed price, support obligation, warranty, exclusivity or
+commercial-use permission is implied by this license.
+
+Downloading, installing, receiving an automatic update, modifying or paying
+a third party for the Software does not itself grant commercial
+authorization from vianvio. A payment alone is not a substitute for the
+required written authorization.
+
+4. Third-party materials and earlier grants
+
+Third-party components, dependencies and other material supplied under
+separate license terms remain governed by their respective licenses.
+Their applicable notices are retained in THIRD-PARTY-NOTICES.md and in
+their own source or package distributions. This license does not restrict
+rights those separate licenses already grant.
+
+Versions 0.1.8 and earlier were distributed under the MIT License. Valid
+rights already granted for copies received under MIT or another prior
+license are not revoked, restricted or retroactively replaced by these
+terms. A separate written agreement may also grant rights independently
+of this license.
+
+No rights in material the Licensor does not own or have authority to license
+are claimed by this license.
+
+5. Compliance and termination
+
+The permissions granted by this license terminate if you use the Software
+outside their scope or fail to comply with these terms. On termination,
+stop uses that depend on this license. Termination does not remove rights
+you independently hold under a third-party license, a prior grant or a
+separate written agreement. All rights not expressly granted are reserved.
+No trademark, trade name or endorsement rights are granted.
+
+6. Disclaimer and limitation of liability
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. TO THE MAXIMUM EXTENT
+PERMITTED BY APPLICABLE LAW, THE LICENSOR AND CONTRIBUTORS SHALL NOT BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR ITS USE OR OTHER DEALINGS.
+
+A separate signed commercial agreement controls to the extent it expressly
+provides different terms.
